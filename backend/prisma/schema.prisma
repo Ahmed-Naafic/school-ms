@@ -1,0 +1,148 @@
+// Prisma schema for the School Management System backend.
+// Only Prisma accesses the database, per Database-Standards.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  SCHOOL_ADMIN
+  ACCOUNTANT
+  TEACHER
+  STUDENT
+}
+
+// Lifecycle status of an Account, per Authentication-and-Authorization.md.
+// MUST_CHANGE_CREDENTIALS is the state the bootstrap Super Admin is created in (Business Rule #23).
+enum AccountStatus {
+  ACTIVE
+  LOCKED
+  DEACTIVATED
+  MUST_CHANGE_CREDENTIALS
+}
+
+// Lifecycle status of a School, per School-Management.md.
+// SUSPENDED is temporary/reversible; CLOSED is permanent (Business Rule #12).
+enum SchoolLifecycleStatus {
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+// Independent of SchoolLifecycleStatus — a subscription change never
+// automatically changes lifecycle status (Business Rule #13).
+enum SubscriptionStatus {
+  ACTIVE
+  TRIAL
+  EXPIRED
+}
+
+model School {
+  id     String @id @default(uuid())
+
+  // Core identifying information — Super Admin only (Business Rule #14).
+  name   String @unique
+
+  // Operational profile information — School Admin editable (Business Rule #14).
+  contactEmail String?
+  contactPhone String?
+  address      String?
+
+  lifecycleStatus    SchoolLifecycleStatus @default(ACTIVE)
+  subscriptionStatus SubscriptionStatus    @default(TRIAL)
+
+  accounts Account[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("schools")
+}
+
+model Account {
+  id     String @id @default(uuid())
+
+  // Platform-wide unique login identifier and verified recovery contact
+  // (Business Rules #21). One field serves both purposes.
+  email        String  @unique
+  // Nullable: an account in MUST_CHANGE_CREDENTIALS status has no usable
+  // password yet — the owner establishes it themselves (Business Rule #9),
+  // via the same password-recovery flow used for forgotten passwords.
+  passwordHash String?
+
+  role   UserRole
+  status AccountStatus @default(ACTIVE)
+
+  // Nullable only for Super Admin (Business Rule #2 / Authentication Business Rule #2).
+  schoolId String?
+  school   School? @relation(fields: [schoolId], references: [id])
+
+  // Account lockout tracking (Security-Standards.md: 5 attempts / 15-minute lockout).
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+
+  refreshTokens RefreshToken[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("accounts")
+}
+
+// Server-tracked by reference so a specific refresh token can be individually
+// revoked (logout, deactivation, lockout, role change) per Security-Standards.md.
+model RefreshToken {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("refresh_tokens")
+}
+
+// Supports both the "forgot password" flow and the initial-credential-setup
+// flow for accounts created in MUST_CHANGE_CREDENTIALS status — both reuse
+// this same mechanism rather than inventing a separate invitation system.
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+
+  accountId String
+
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("password_reset_tokens")
+}
+
+// Standard audit record (Tenant, User, Action, Timestamp) per Multi-Tenancy.md.
+// Shared by every feature, not owned by auth or schools alone.
+model AuditLog {
+  id String @id @default(uuid())
+
+  // Nullable: some platform-level actions (e.g. bootstrap) have no school.
+  schoolId String?
+
+  // Nullable: the bootstrap event has no prior actor.
+  userId String?
+
+  action    String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@map("audit_logs")
+}
