@@ -5,6 +5,7 @@ import { ClassStatusBadge } from '../components/ClassStatusBadge';
 import { CreateClassDialog } from '../components/CreateClassDialog';
 import { CreateSectionDialog } from '../components/CreateSectionDialog';
 import { EditClassDialog } from '../components/EditClassDialog';
+import { EditSectionDialog } from '../components/EditSectionDialog';
 import * as classesService from '../services/classes.service';
 import { formatClassSectionName } from '../utils/format-class-section-name';
 
@@ -15,6 +16,7 @@ export function ClassesListPage() {
   const [createClassOpen, setCreateClassOpen] = React.useState(false);
   const [sectionDialogClassId, setSectionDialogClassId] = React.useState(null);
   const [editingClass, setEditingClass] = React.useState(null);
+  const [editingSection, setEditingSection] = React.useState(null);
 
   const classOptions = React.useMemo(
     () => classes.filter((c) => c.status === 'ACTIVE').map((c) => ({ value: c.id, label: c.name })),
@@ -49,6 +51,12 @@ export function ClassesListPage() {
   const handleSaveClassName = async (data) => {
     await classesService.updateClass(editingClass.id, data);
     showToast({ tone: 'success', title: 'Class updated' });
+    load();
+  };
+
+  const handleSaveSectionName = async (data) => {
+    await classesService.updateSection(editingSection.classId, editingSection.sectionId, data);
+    showToast({ tone: 'success', title: 'Section updated' });
     load();
   };
 
@@ -119,9 +127,23 @@ export function ClassesListPage() {
                       <div className="flex flex-wrap items-center gap-1.5">
                         {cls.sections.map((section) => (
                           <div key={section.id} className="flex items-center gap-1">
-                            <Tag className={section.status === 'ARCHIVED' ? 'opacity-50' : ''}>
-                              {formatClassSectionName(cls.name, section.name)}
-                            </Tag>
+                            <Tooltip label="Edit Section">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setEditingSection({
+                                    classId: cls.id,
+                                    sectionId: section.id,
+                                    name: section.name,
+                                    combinedName: formatClassSectionName(cls.name, section.name),
+                                  })
+                                }
+                              >
+                                <Tag className={['cursor-pointer', section.status === 'ARCHIVED' ? 'opacity-50' : ''].join(' ')}>
+                                  {formatClassSectionName(cls.name, section.name)}
+                                </Tag>
+                              </button>
+                            </Tooltip>
                             {!isArchived &&
                               (section.status === 'ARCHIVED' ? (
                                 <Tooltip label="Reactivate Section">
@@ -271,6 +293,13 @@ export function ClassesListPage() {
         initialName={editingClass?.name}
         onClose={() => setEditingClass(null)}
         onSave={handleSaveClassName}
+      />
+      <EditSectionDialog
+        open={editingSection !== null}
+        initialName={editingSection?.name}
+        combinedName={editingSection?.combinedName}
+        onClose={() => setEditingSection(null)}
+        onSave={handleSaveSectionName}
       />
     </div>
   );
