@@ -77,7 +77,7 @@ describe('PATCH /teachers/me (Business Rule #10)', () => {
     expect(res.body.data.contactAddress).toBe('99 Self St');
   });
 
-  it.each(['fullName', 'employmentStatus', 'employeeId', 'departmentId', 'schoolId', 'accountId'])(
+  it.each(['fullName', 'employmentStatus', 'employeeId', 'schoolId', 'accountId'])(
     'rejects a self-service update containing %s (stricter than the School-Admin endpoint)',
     async (field) => {
       const res = await request(app)

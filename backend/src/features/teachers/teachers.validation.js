@@ -6,7 +6,6 @@ const OPTIONAL_STRING_FIELDS = [
   'contactPhone',
   'contactAddress',
   'employmentType',
-  'departmentId',
   'qualifications',
   'relevantExperience',
 ];
@@ -111,9 +110,6 @@ function validateListTeachers(query) {
   if (query.employmentStatus !== undefined && !VALID_EMPLOYMENT_STATUSES.includes(query.employmentStatus)) {
     errors.employmentStatus = `Employment status must be one of: ${VALID_EMPLOYMENT_STATUSES.join(', ')}.`;
   }
-  if (query.departmentId !== undefined && typeof query.departmentId !== 'string') {
-    errors.departmentId = 'Department must be a string identifier.';
-  }
   if (query.page !== undefined && (!Number.isInteger(Number(query.page)) || Number(query.page) < 1)) {
     errors.page = 'Page must be a positive whole number.';
   }
@@ -159,67 +155,10 @@ function validateUpdateOwnContactInfo(body) {
   }
 }
 
-// --- Department (WP4) --------------------------------------------------
-// `status` and `schoolId` are rejected explicitly here too — the same
-// Guard-by-Construction principle applied to Teacher's profile fields,
-// kept consistent across both entities in this module (Technical Design's
-// second-review fix). Archiving is only reachable via the dedicated
-// archive endpoint, never through create/update.
-
-function rejectDepartmentStructuralFields(body, errors) {
-  if (body.status !== undefined) {
-    errors.status = 'status may not be set through this request.';
-  }
-  if (body.schoolId !== undefined) {
-    errors.schoolId = 'schoolId may not be set through this request.';
-  }
-}
-
-function validateCreateDepartment(body) {
-  const errors = {};
-
-  if (!body.name || typeof body.name !== 'string' || body.name.trim().length === 0) {
-    errors.name = 'Name is required.';
-  }
-  rejectDepartmentStructuralFields(body, errors);
-
-  if (Object.keys(errors).length > 0) {
-    throw new ValidationError('Invalid Department request', errors);
-  }
-}
-
-function validateUpdateDepartment(body) {
-  const errors = {};
-
-  if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length === 0)) {
-    errors.name = 'Name must be a non-empty string.';
-  }
-  rejectDepartmentStructuralFields(body, errors);
-
-  if (Object.keys(errors).length > 0) {
-    throw new ValidationError('Invalid Department update', errors);
-  }
-}
-
-function validateListDepartments(query) {
-  const errors = {};
-
-  if (query.includeArchived !== undefined && !['true', 'false'].includes(query.includeArchived)) {
-    errors.includeArchived = 'includeArchived must be "true" or "false".';
-  }
-
-  if (Object.keys(errors).length > 0) {
-    throw new ValidationError('Invalid Department query', errors);
-  }
-}
-
 module.exports = {
   validateOnboardTeacher,
   validateUpdateTeacherProfile,
   validateListTeachers,
   validateEmploymentTransition,
-  validateCreateDepartment,
-  validateUpdateDepartment,
-  validateListDepartments,
   validateUpdateOwnContactInfo,
 };

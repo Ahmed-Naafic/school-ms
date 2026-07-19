@@ -18,20 +18,6 @@ async function getTeacherOrThrow(schoolId, teacherId) {
   return teacher;
 }
 
-// A Teacher's Department must belong to the same school and must not be
-// archived (Business Rule #9). Shared by Onboarding and profile update
-// (WP2) — Department's own CRUD is added by WP4, in this same module.
-async function assertDepartmentAssignable(schoolId, departmentId) {
-  const department = await repository.findDepartmentById(departmentId);
-  if (!department || department.schoolId !== schoolId) {
-    throw new NotFoundError('Department not found');
-  }
-  if (department.status === 'ARCHIVED') {
-    throw new ConflictError('This Department is archived and cannot be assigned');
-  }
-  return department;
-}
-
 // System-generated at Onboarding, immutable thereafter (Business Rule #8).
 // Uniqueness is scoped per school; the database's own unique constraint
 // (schoolId, employeeId) is the final guarantee, per the Implementation
@@ -62,15 +48,10 @@ async function onboardTeacher(payload, actingUser) {
     contactAddress,
     joiningDate,
     employmentType,
-    departmentId,
     qualifications,
     subjectSpecializations,
     relevantExperience,
   } = payload;
-
-  if (departmentId) {
-    await assertDepartmentAssignable(schoolId, departmentId);
-  }
 
   const teacher = await prisma.$transaction(async (tx) => {
     const account = await authService.createAccount({ email, role: 'TEACHER', schoolId }, actingUser, tx);
@@ -85,7 +66,6 @@ async function onboardTeacher(payload, actingUser) {
         contactAddress: contactAddress || null,
         joiningDate: new Date(joiningDate),
         employmentType: employmentType || null,
-        departmentId: departmentId || null,
         qualifications: qualifications || null,
         subjectSpecializations: subjectSpecializations || [],
         relevantExperience: relevantExperience || null,
@@ -116,15 +96,10 @@ async function updateTeacherProfile(teacherId, payload, actingUser) {
     contactAddress,
     joiningDate,
     employmentType,
-    departmentId,
     qualifications,
     subjectSpecializations,
     relevantExperience,
   } = payload;
-
-  if (departmentId !== undefined && departmentId !== null) {
-    await assertDepartmentAssignable(schoolId, departmentId);
-  }
 
   const updated = await repository.update(teacherId, {
     ...(fullName !== undefined ? { fullName } : {}),
@@ -132,7 +107,6 @@ async function updateTeacherProfile(teacherId, payload, actingUser) {
     ...(contactAddress !== undefined ? { contactAddress } : {}),
     ...(joiningDate !== undefined ? { joiningDate: new Date(joiningDate) } : {}),
     ...(employmentType !== undefined ? { employmentType } : {}),
-    ...(departmentId !== undefined ? { departmentId } : {}),
     ...(qualifications !== undefined ? { qualifications } : {}),
     ...(subjectSpecializations !== undefined ? { subjectSpecializations } : {}),
     ...(relevantExperience !== undefined ? { relevantExperience } : {}),
@@ -143,12 +117,11 @@ async function updateTeacherProfile(teacherId, payload, actingUser) {
   return updated;
 }
 
-async function listTeachers({ employmentStatus, departmentId, page = 1, pageSize = 20 }, actingUser) {
+async function listTeachers({ employmentStatus, page = 1, pageSize = 20 }, actingUser) {
   const schoolId = actingUser.schoolId;
   const { teachers, total } = await repository.listBySchool({
     schoolId,
     employmentStatus,
-    departmentId,
     page,
     pageSize,
   });
@@ -327,91 +300,8 @@ async function updateOwnContactInfo(accountId, { contactPhone, contactAddress })
   return updated;
 }
 
-// --- Department Reference List (WP4) ----------------------------------------
-// Managed within this same module — no independent lifecycle apart from the
-// Teacher records that reference it, mirroring Class Management's Section,
-// per the Technical Design's Architecture and Backend Design sections.
-
-async function getDepartmentOrThrow(schoolId, departmentId) {
-  const department = await repository.findDepartmentById(departmentId);
-  if (!department || department.schoolId !== schoolId) {
-    throw new NotFoundError('Department not found');
-  }
-  return department;
-}
-
-async function createDepartment({ name }, actingUser) {
-  const schoolId = actingUser.schoolId;
-
-  const existing = await repository.findDepartmentByName(schoolId, name);
-  if (existing) {
-    throw new ConflictError('A Department with this name already exists in your school');
-  }
-
-  const department = await repository.createDepartment({ schoolId, name });
-
-  await recordAuditEvent({ schoolId, userId: actingUser.id, action: 'DEPARTMENT_CREATED' });
-
-  return department;
-}
-
-// Guard by construction: only `name` is ever accepted here — `status` and
-// `schoolId` are excluded from this function's own parameter destructuring,
-// the same principle already applied to Teacher's employmentStatus (WP2).
-// Archiving is only reachable through archiveDepartment below, per the
-// Technical Design's second-review fix.
-async function updateDepartment(departmentId, { name }, actingUser) {
-  const schoolId = actingUser.schoolId;
-  await getDepartmentOrThrow(schoolId, departmentId);
-
-  if (name !== undefined) {
-    const existing = await repository.findDepartmentByName(schoolId, name);
-    if (existing && existing.id !== departmentId) {
-      throw new ConflictError('A Department with this name already exists in your school');
-    }
-  }
-
-  const updated = await repository.updateDepartment(departmentId, {
-    ...(name !== undefined ? { name } : {}),
-  });
-
-  await recordAuditEvent({ schoolId, userId: actingUser.id, action: 'DEPARTMENT_UPDATED' });
-
-  return updated;
-}
-
-// Business Rule #9: archiving removes a Department from selection without
-// deleting it or invalidating any Teacher record that already references
-// it — Archive Before Delete, the same pattern Class Management already
-// uses for archiving a Class or Section.
-async function archiveDepartment(departmentId, actingUser) {
-  const schoolId = actingUser.schoolId;
-  const department = await getDepartmentOrThrow(schoolId, departmentId);
-
-  if (department.status === 'ARCHIVED') {
-    throw new ConflictError('This Department is already archived');
-  }
-
-  const updated = await repository.archiveDepartment(departmentId);
-
-  await recordAuditEvent({ schoolId, userId: actingUser.id, action: 'DEPARTMENT_ARCHIVED' });
-
-  return updated;
-}
-
-// Excludes archived entries by default — the selector-population use case
-// (Onboarding, profile update) must never offer an archived entry, per
-// Business Rule #9. includeArchived is for the Department management
-// screen itself, which needs administrative visibility into archived
-// entries even though they are no longer selectable.
-async function listDepartments({ includeArchived = false }, actingUser) {
-  const schoolId = actingUser.schoolId;
-  return repository.listDepartmentsBySchool({ schoolId, includeArchived });
-}
-
 module.exports = {
   getTeacherOrThrow,
-  assertDepartmentAssignable,
   onboardTeacher,
   updateTeacherProfile,
   listTeachers,
@@ -422,11 +312,6 @@ module.exports = {
   rehire,
   terminate,
   retire,
-  getDepartmentOrThrow,
-  createDepartment,
-  updateDepartment,
-  archiveDepartment,
-  listDepartments,
   getOwnProfile,
   updateOwnContactInfo,
 };

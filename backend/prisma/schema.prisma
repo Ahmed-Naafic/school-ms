@@ -57,11 +57,10 @@ model School {
   lifecycleStatus    SchoolLifecycleStatus @default(ACTIVE)
   subscriptionStatus SubscriptionStatus    @default(TRIAL)
 
-  accounts    Account[]
-  classes     Class[]
-  students    Student[]
-  teachers    Teacher[]
-  departments Department[]
+  accounts Account[]
+  classes  Class[]
+  students Student[]
+  teachers Teacher[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -299,36 +298,6 @@ model Enrollment {
   @@map("enrollments")
 }
 
-// A school's own Department reference list, per Teacher-Management.md.
-// Archiving removes an entry from selection without deleting it or
-// invalidating any Teacher record that already references it (Business Rule
-// #9, Archive Before Delete) — never shared across schools.
-enum DepartmentStatus {
-  ACTIVE
-  ARCHIVED
-}
-
-model Department {
-  id String @id @default(uuid())
-
-  schoolId String
-  school   School @relation(fields: [schoolId], references: [id])
-
-  // Unique within a school, not platform-wide.
-  name String
-
-  status DepartmentStatus @default(ACTIVE)
-
-  teachers Teacher[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([schoolId, name])
-  @@index([schoolId])
-  @@map("departments")
-}
-
 // Teacher employment lifecycle, per Teacher-Management.md. Distinct from
 // Account.status (Authentication & Authorization's own field) — the two are
 // related only through the one-directional synchronization this feature's
@@ -371,15 +340,6 @@ model Teacher {
 
   joiningDate    DateTime
   employmentType String?
-
-  // Restrict, not the relation's default SetNull: a Department row is only
-  // ever archived (Business Rule #9), never deleted, at the application
-  // layer — this makes an out-of-band deletion fail loudly instead of
-  // silently orphaning the reference, per Database-Standards.md's "protect
-  // against... orphan records" and "cascade operations must be explicitly
-  // considered."
-  departmentId String?
-  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Restrict)
 
   qualifications         String?
   subjectSpecializations String[] @default([])

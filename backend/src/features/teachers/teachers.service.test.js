@@ -67,28 +67,6 @@ describe('onboardTeacher (Business Rules #1, #2, #3)', () => {
     expect(createArg.employeeId).not.toBe('CLIENT-SUPPLIED');
   });
 
-  it('validates a departmentId belongs to the same school and is not archived', async () => {
-    repository.findDepartmentById.mockResolvedValue({ id: 'dept-1', schoolId: 'other-school', status: 'ACTIVE' });
-
-    await expect(
-      service.onboardTeacher(
-        { email: 'a@example.com', fullName: 'A Teacher', joiningDate: '2026-01-15', departmentId: 'dept-1' },
-        actingUser
-      )
-    ).rejects.toThrow('Department not found');
-    expect(authService.createAccount).not.toHaveBeenCalled();
-  });
-
-  it('rejects an archived Department', async () => {
-    repository.findDepartmentById.mockResolvedValue({ id: 'dept-1', schoolId: 'school-1', status: 'ARCHIVED' });
-
-    await expect(
-      service.onboardTeacher(
-        { email: 'a@example.com', fullName: 'A Teacher', joiningDate: '2026-01-15', departmentId: 'dept-1' },
-        actingUser
-      )
-    ).rejects.toThrow('This Department is archived and cannot be assigned');
-  });
 });
 
 describe('getTeacherDetail / getTeacherOrThrow (tenant isolation)', () => {
@@ -135,26 +113,6 @@ describe('updateTeacherProfile (Business Rules #10, #11)', () => {
 
     const updateArg = repository.update.mock.calls[0][1];
     expect(updateArg).toEqual({ fullName: 'New Name' });
-  });
-
-  it('validates a new departmentId before applying the update', async () => {
-    repository.findById.mockResolvedValue({ id: 't1', schoolId: 'school-1' });
-    repository.findDepartmentById.mockResolvedValue({ id: 'dept-1', schoolId: 'school-1', status: 'ARCHIVED' });
-
-    await expect(
-      service.updateTeacherProfile('t1', { departmentId: 'dept-1' }, actingUser)
-    ).rejects.toThrow('This Department is archived and cannot be assigned');
-    expect(repository.update).not.toHaveBeenCalled();
-  });
-
-  it('allows clearing departmentId with null without a Department lookup', async () => {
-    repository.findById.mockResolvedValue({ id: 't1', schoolId: 'school-1' });
-    repository.update.mockResolvedValue({ id: 't1', departmentId: null });
-
-    await service.updateTeacherProfile('t1', { departmentId: null }, actingUser);
-
-    expect(repository.findDepartmentById).not.toHaveBeenCalled();
-    expect(repository.update).toHaveBeenCalledWith('t1', { departmentId: null });
   });
 
   it('rejects updating a Teacher outside the acting user\'s school', async () => {
@@ -375,131 +333,15 @@ describe('Self-Service (Business Rules #10, #12)', () => {
   });
 });
 
-describe('Department reference list (Business Rule #9)', () => {
-  describe('createDepartment', () => {
-    it('creates a Department scoped to the acting user\'s school', async () => {
-      repository.findDepartmentByName.mockResolvedValue(null);
-      repository.createDepartment.mockResolvedValue({ id: 'dept-1', schoolId: 'school-1', name: 'Science' });
-
-      await service.createDepartment({ name: 'Science' }, actingUser);
-
-      expect(repository.findDepartmentByName).toHaveBeenCalledWith('school-1', 'Science');
-      expect(repository.createDepartment).toHaveBeenCalledWith({ schoolId: 'school-1', name: 'Science' });
-      expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'DEPARTMENT_CREATED' }));
-    });
-
-    // Validation Report (Phase 7) finding: a duplicate Department name within
-    // the same school reached Prisma's own unique constraint unguarded,
-    // surfacing as an unhandled 500 instead of the Technical Design's
-    // documented 409 — the same (schoolId, name) precheck Class Management's
-    // createClass already performs was missing here.
-    it('rejects a duplicate Department name within the same school (409, before any write)', async () => {
-      repository.findDepartmentByName.mockResolvedValue({ id: 'existing-dept', schoolId: 'school-1', name: 'Science' });
-
-      await expect(service.createDepartment({ name: 'Science' }, actingUser)).rejects.toThrow(
-        'A Department with this name already exists in your school'
-      );
-      expect(repository.createDepartment).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('updateDepartment', () => {
-    it('updates only the name, never status or schoolId', async () => {
-      repository.findDepartmentById.mockResolvedValue({ id: 'dept-1', schoolId: 'school-1', status: 'ACTIVE' });
-      repository.findDepartmentByName.mockResolvedValue(null);
-      repository.updateDepartment.mockResolvedValue({ id: 'dept-1', name: 'Renamed' });
-
-      await service.updateDepartment('dept-1', { name: 'Renamed', status: 'ARCHIVED', schoolId: 'other' }, actingUser);
-
-      expect(repository.updateDepartment).toHaveBeenCalledWith('dept-1', { name: 'Renamed' });
-    });
-
-    it('rejects updating a Department outside the acting user\'s school', async () => {
-      repository.findDepartmentById.mockResolvedValue({ id: 'dept-1', schoolId: 'other-school' });
-
-      await expect(service.updateDepartment('dept-1', { name: 'X' }, actingUser)).rejects.toThrow(
-        'Department not found'
-      );
-      expect(repository.updateDepartment).not.toHaveBeenCalled();
-    });
-
-    it('rejects renaming a Department to a name already used by another Department in the same school (409)', async () => {
-      repository.findDepartmentById.mockResolvedValue({ id: 'dept-1', schoolId: 'school-1', status: 'ACTIVE' });
-      repository.findDepartmentByName.mockResolvedValue({ id: 'dept-2', schoolId: 'school-1', name: 'Science' });
-
-      await expect(service.updateDepartment('dept-1', { name: 'Science' }, actingUser)).rejects.toThrow(
-        'A Department with this name already exists in your school'
-      );
-      expect(repository.updateDepartment).not.toHaveBeenCalled();
-    });
-
-    it('allows updating a Department to its own current name (no self-conflict)', async () => {
-      repository.findDepartmentById.mockResolvedValue({ id: 'dept-1', schoolId: 'school-1', status: 'ACTIVE' });
-      repository.findDepartmentByName.mockResolvedValue({ id: 'dept-1', schoolId: 'school-1', name: 'Science' });
-      repository.updateDepartment.mockResolvedValue({ id: 'dept-1', name: 'Science' });
-
-      await service.updateDepartment('dept-1', { name: 'Science' }, actingUser);
-
-      expect(repository.updateDepartment).toHaveBeenCalledWith('dept-1', { name: 'Science' });
-    });
-  });
-
-  describe('archiveDepartment', () => {
-    it('archives an active Department', async () => {
-      repository.findDepartmentById.mockResolvedValue({ id: 'dept-1', schoolId: 'school-1', status: 'ACTIVE' });
-      repository.archiveDepartment.mockResolvedValue({ id: 'dept-1', status: 'ARCHIVED' });
-
-      await service.archiveDepartment('dept-1', actingUser);
-
-      expect(repository.archiveDepartment).toHaveBeenCalledWith('dept-1');
-      expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'DEPARTMENT_ARCHIVED' }));
-    });
-
-    it('rejects archiving an already-archived Department', async () => {
-      repository.findDepartmentById.mockResolvedValue({ id: 'dept-1', schoolId: 'school-1', status: 'ARCHIVED' });
-
-      await expect(service.archiveDepartment('dept-1', actingUser)).rejects.toThrow(
-        'This Department is already archived'
-      );
-      expect(repository.archiveDepartment).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('listDepartments', () => {
-    it('excludes archived entries by default', async () => {
-      repository.listDepartmentsBySchool.mockResolvedValue([{ id: 'dept-1', status: 'ACTIVE' }]);
-
-      await service.listDepartments({}, actingUser);
-
-      expect(repository.listDepartmentsBySchool).toHaveBeenCalledWith({
-        schoolId: 'school-1',
-        includeArchived: false,
-      });
-    });
-
-    it('includes archived entries when explicitly requested', async () => {
-      repository.listDepartmentsBySchool.mockResolvedValue([]);
-
-      await service.listDepartments({ includeArchived: true }, actingUser);
-
-      expect(repository.listDepartmentsBySchool).toHaveBeenCalledWith({
-        schoolId: 'school-1',
-        includeArchived: true,
-      });
-    });
-  });
-});
-
 describe('listTeachers', () => {
   it('scopes the roster to the acting user\'s school and passes filters through', async () => {
     repository.listBySchool.mockResolvedValue({ teachers: [{ id: 't1' }], total: 1 });
 
-    const result = await service.listTeachers({ employmentStatus: 'ACTIVE', departmentId: 'dept-1' }, actingUser);
+    const result = await service.listTeachers({ employmentStatus: 'ACTIVE' }, actingUser);
 
     expect(repository.listBySchool).toHaveBeenCalledWith({
       schoolId: 'school-1',
       employmentStatus: 'ACTIVE',
-      departmentId: 'dept-1',
       page: 1,
       pageSize: 20,
     });

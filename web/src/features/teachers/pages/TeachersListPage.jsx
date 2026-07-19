@@ -1,5 +1,4 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
 import { Button, Card, IconButton, Select, Tooltip } from '../../../shared/components';
 import { useToast } from '../../../shared/toast/ToastContext';
 import { TeacherStatusBadge } from '../components/TeacherStatusBadge';
@@ -59,41 +58,28 @@ const PAGE_SIZE = 20;
 
 export function TeachersListPage() {
   const { showToast } = useToast();
-  const navigate = useNavigate();
   const [teachers, setTeachers] = React.useState([]);
   const [page, setPage] = React.useState(1);
   const [statusFilter, setStatusFilter] = React.useState('');
-  const [departmentFilter, setDepartmentFilter] = React.useState('');
-  const [departments, setDepartments] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
 
   const [onboardOpen, setOnboardOpen] = React.useState(false);
   const [editingTeacher, setEditingTeacher] = React.useState(null);
   const [transition, setTransition] = React.useState(null); // { action, teacher }
 
-  const departmentOptions = React.useMemo(
-    () => departments.filter((d) => d.status === 'ACTIVE').map((d) => ({ value: d.id, label: d.name })),
-    [departments]
-  );
-
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [teacherResult, departmentList] = await Promise.all([
-        teachersService.listTeachers({
-          employmentStatus: statusFilter || undefined,
-          departmentId: departmentFilter || undefined,
-          page,
-          pageSize: PAGE_SIZE,
-        }),
-        teachersService.listDepartments(),
-      ]);
+      const teacherResult = await teachersService.listTeachers({
+        employmentStatus: statusFilter || undefined,
+        page,
+        pageSize: PAGE_SIZE,
+      });
       setTeachers(teacherResult);
-      setDepartments(departmentList);
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, departmentFilter, page]);
+  }, [statusFilter, page]);
 
   React.useEffect(() => {
     load();
@@ -128,9 +114,6 @@ export function TeachersListPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => navigate('/departments')}>
-            Departments
-          </Button>
           <Button onClick={() => setOnboardOpen(true)}>Onboard Teacher</Button>
         </div>
       </div>
@@ -143,14 +126,6 @@ export function TeachersListPage() {
             setStatusFilter(e.target.value);
           }}
           options={STATUS_OPTIONS}
-        />
-        <Select
-          value={departmentFilter}
-          onChange={(e) => {
-            setPage(1);
-            setDepartmentFilter(e.target.value);
-          }}
-          options={[{ value: '', label: 'All Departments' }, ...departmentOptions]}
         />
       </div>
 
@@ -166,21 +141,18 @@ export function TeachersListPage() {
                 <tr className="border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500 dark:border-navy-700 dark:text-gray-400">
                   <th className="px-5 py-3 font-bold">Name</th>
                   <th className="px-5 py-3 font-bold">Employee ID</th>
-                  <th className="px-5 py-3 font-bold">Department</th>
                   <th className="px-5 py-3 font-bold">Status</th>
                   <th className="px-5 py-3 font-bold">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {teachers.map((teacher) => {
-                  const department = departments.find((d) => d.id === teacher.departmentId);
                   const availableTransitions = TRANSITIONS_BY_STATUS[teacher.employmentStatus] || [];
 
                   return (
                     <tr key={teacher.id} className="border-b border-gray-100 last:border-0 dark:border-navy-800">
                       <td className="px-5 py-3 text-gray-900 dark:text-gray-100">{teacher.fullName}</td>
                       <td className="px-5 py-3 text-gray-700 dark:text-gray-300">{teacher.employeeId}</td>
-                      <td className="px-5 py-3 text-gray-700 dark:text-gray-300">{department ? department.name : '—'}</td>
                       <td className="px-5 py-3">
                         <TeacherStatusBadge status={teacher.employmentStatus} />
                       </td>
@@ -236,18 +208,12 @@ export function TeachersListPage() {
         </Button>
       </div>
 
-      <OnboardTeacherDialog
-        open={onboardOpen}
-        onClose={() => setOnboardOpen(false)}
-        onCreate={handleOnboard}
-        departmentOptions={departmentOptions}
-      />
+      <OnboardTeacherDialog open={onboardOpen} onClose={() => setOnboardOpen(false)} onCreate={handleOnboard} />
       <EditTeacherDialog
         open={editingTeacher !== null}
         teacher={editingTeacher}
         onClose={() => setEditingTeacher(null)}
         onSave={handleSaveProfile}
-        departmentOptions={departmentOptions}
       />
       <EmploymentStatusActionDialog
         open={transition !== null}

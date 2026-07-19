@@ -28,7 +28,6 @@ describe('validateOnboardTeacher', () => {
         contactPhone: '555-0100',
         contactAddress: '1 Main St',
         employmentType: 'Full-time',
-        departmentId: 'dept-1',
         qualifications: 'B.Ed.',
         subjectSpecializations: ['Math', 'Science'],
         relevantExperience: '5 years',
@@ -74,16 +73,11 @@ describe('validateUpdateTeacherProfile', () => {
         contactAddress: '1 Main St',
         joiningDate: '2026-01-15',
         employmentType: 'Part-time',
-        departmentId: 'dept-1',
         qualifications: 'M.Ed.',
         subjectSpecializations: ['History'],
         relevantExperience: '10 years',
       })
     ).not.toThrow();
-  });
-
-  it('allows departmentId to be explicitly cleared with null', () => {
-    expect(() => validation.validateUpdateTeacherProfile({ departmentId: null })).not.toThrow();
   });
 
   it('rejects an empty-string fullName', () => {
@@ -130,7 +124,7 @@ describe('validateUpdateOwnContactInfo', () => {
   // Business Rule #10: only contactPhone/contactAddress are Teacher-editable
   // — stricter than the School-Admin-facing profile update, which only
   // rejects the four structural/lifecycle fields.
-  it.each(['fullName', 'joiningDate', 'departmentId', 'employmentStatus', 'employeeId', 'schoolId', 'accountId'])(
+  it.each(['fullName', 'joiningDate', 'employmentStatus', 'employeeId', 'schoolId', 'accountId'])(
     'rejects a request containing %s, even though some of these are legitimate School-Admin fields',
     (field) => {
       expect(() => validation.validateUpdateOwnContactInfo({ [field]: 'x' })).toThrow(

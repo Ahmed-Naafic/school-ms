@@ -17,7 +17,6 @@ import { PlatformStatisticsPage } from '../features/schools/pages/PlatformStatis
 import { ClassesListPage } from '../features/classes/pages/ClassesListPage';
 import { StudentsListPage } from '../features/students/pages/StudentsListPage';
 import { TeachersListPage } from '../features/teachers/pages/TeachersListPage';
-import { DepartmentsPage } from '../features/teachers/pages/DepartmentsPage';
 
 export function App() {
   return (
@@ -100,14 +99,6 @@ export function App() {
                 element={
                   <ProtectedRoute allowedRoles={['SCHOOL_ADMIN']}>
                     <TeachersListPage />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/departments"
-                element={
-                  <ProtectedRoute allowedRoles={['SCHOOL_ADMIN']}>
-                    <DepartmentsPage />
                   </ProtectedRoute>
                 }
               />

@@ -11,7 +11,6 @@ import {
   ClassesIcon,
   StudentsIcon,
   TeachersIcon,
-  DepartmentsIcon,
   SunIcon,
   MoonIcon,
   MenuIcon,
@@ -29,7 +28,6 @@ const NAV_LINKS = {
   SCHOOL_ADMIN: [
     { to: '/students', label: 'Students', icon: StudentsIcon },
     { to: '/teachers', label: 'Teachers', icon: TeachersIcon },
-    { to: '/departments', label: 'Departments', icon: DepartmentsIcon },
     { to: '/classes', label: 'Classes', icon: ClassesIcon },
     { to: '/accounts', label: 'Accounts', icon: AccountsIcon },
   ],

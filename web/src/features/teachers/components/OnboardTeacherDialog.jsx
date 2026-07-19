@@ -1,14 +1,13 @@
 import React from 'react';
-import { Dialog, Input, Select } from '../../../shared/components';
+import { Dialog, Input } from '../../../shared/components';
 
-export function OnboardTeacherDialog({ open, onClose, onCreate, departmentOptions }) {
+export function OnboardTeacherDialog({ open, onClose, onCreate }) {
   const [email, setEmail] = React.useState('');
   const [fullName, setFullName] = React.useState('');
   const [joiningDate, setJoiningDate] = React.useState('');
   const [contactPhone, setContactPhone] = React.useState('');
   const [contactAddress, setContactAddress] = React.useState('');
   const [employmentType, setEmploymentType] = React.useState('');
-  const [departmentId, setDepartmentId] = React.useState('');
   const [qualifications, setQualifications] = React.useState('');
   const [subjectSpecializations, setSubjectSpecializations] = React.useState('');
   const [relevantExperience, setRelevantExperience] = React.useState('');
@@ -22,7 +21,6 @@ export function OnboardTeacherDialog({ open, onClose, onCreate, departmentOption
     setContactPhone('');
     setContactAddress('');
     setEmploymentType('');
-    setDepartmentId('');
     setQualifications('');
     setSubjectSpecializations('');
     setRelevantExperience('');
@@ -39,7 +37,6 @@ export function OnboardTeacherDialog({ open, onClose, onCreate, departmentOption
         contactPhone: contactPhone || undefined,
         contactAddress: contactAddress || undefined,
         employmentType: employmentType || undefined,
-        departmentId: departmentId || undefined,
         qualifications: qualifications || undefined,
         subjectSpecializations: subjectSpecializations
           ? subjectSpecializations.split(',').map((s) => s.trim()).filter(Boolean)
@@ -74,12 +71,6 @@ export function OnboardTeacherDialog({ open, onClose, onCreate, departmentOption
           value={joiningDate}
           onChange={(e) => setJoiningDate(e.target.value)}
           required
-        />
-        <Select
-          label="Department"
-          value={departmentId}
-          onChange={(e) => setDepartmentId(e.target.value)}
-          options={[{ value: '', label: 'No department' }, ...departmentOptions]}
         />
         <Input
           label="Employment type"

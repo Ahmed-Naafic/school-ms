@@ -1,16 +1,15 @@
 import React from 'react';
-import { Dialog, Input, Select } from '../../../shared/components';
+import { Dialog, Input } from '../../../shared/components';
 
 // Mirrors PATCH /teachers/{id}'s own field whitelist exactly — this dialog
 // never offers employmentStatus, employeeId, schoolId, or accountId, since
 // the backend rejects them outright (Guard by Construction).
-export function EditTeacherDialog({ open, teacher, onClose, onSave, departmentOptions }) {
+export function EditTeacherDialog({ open, teacher, onClose, onSave }) {
   const [fullName, setFullName] = React.useState('');
   const [joiningDate, setJoiningDate] = React.useState('');
   const [contactPhone, setContactPhone] = React.useState('');
   const [contactAddress, setContactAddress] = React.useState('');
   const [employmentType, setEmploymentType] = React.useState('');
-  const [departmentId, setDepartmentId] = React.useState('');
   const [qualifications, setQualifications] = React.useState('');
   const [subjectSpecializations, setSubjectSpecializations] = React.useState('');
   const [relevantExperience, setRelevantExperience] = React.useState('');
@@ -24,7 +23,6 @@ export function EditTeacherDialog({ open, teacher, onClose, onSave, departmentOp
       setContactPhone(teacher.contactPhone || '');
       setContactAddress(teacher.contactAddress || '');
       setEmploymentType(teacher.employmentType || '');
-      setDepartmentId(teacher.departmentId || '');
       setQualifications(teacher.qualifications || '');
       setSubjectSpecializations((teacher.subjectSpecializations || []).join(', '));
       setRelevantExperience(teacher.relevantExperience || '');
@@ -41,7 +39,6 @@ export function EditTeacherDialog({ open, teacher, onClose, onSave, departmentOp
         contactPhone,
         contactAddress,
         employmentType,
-        departmentId: departmentId || null,
         qualifications,
         subjectSpecializations: subjectSpecializations
           .split(',')
@@ -73,12 +70,6 @@ export function EditTeacherDialog({ open, teacher, onClose, onSave, departmentOp
           type="date"
           value={joiningDate}
           onChange={(e) => setJoiningDate(e.target.value)}
-        />
-        <Select
-          label="Department"
-          value={departmentId}
-          onChange={(e) => setDepartmentId(e.target.value)}
-          options={[{ value: '', label: 'No department' }, ...departmentOptions]}
         />
         <Input label="Employment type" value={employmentType} onChange={(e) => setEmploymentType(e.target.value)} />
         <Input label="Contact phone" value={contactPhone} onChange={(e) => setContactPhone(e.target.value)} />

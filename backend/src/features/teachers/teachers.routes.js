@@ -37,22 +37,4 @@ teachersRouter.patch('/:teacherId/rehire', controller.rehire);
 teachersRouter.patch('/:teacherId/terminate', controller.terminate);
 teachersRouter.patch('/:teacherId/retire', controller.retire);
 
-// Department reference list (WP4) — a separate router, mounted at its own
-// flat /departments path (not nested under /teachers), per the Technical
-// Design's API Design section: a Department belongs to the school (the
-// authenticated user's tenant), not to any single Teacher instance. Still
-// implemented in this same module/file, per the Technical Design's Backend
-// Design decision — mirrors Class Management's Section, not a separate
-// feature.
-const departmentsRouter = express.Router();
-
-departmentsRouter.use(authenticate);
-departmentsRouter.use(requireCredentialsEstablished);
-departmentsRouter.use(requireRole('SCHOOL_ADMIN'));
-
-departmentsRouter.get('/', controller.listDepartments);
-departmentsRouter.post('/', controller.createDepartment);
-departmentsRouter.patch('/:departmentId', controller.updateDepartment);
-departmentsRouter.patch('/:departmentId/archive', controller.archiveDepartment);
-
-module.exports = { teachersRouter, departmentsRouter };
+module.exports = { teachersRouter };

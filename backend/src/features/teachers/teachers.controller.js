@@ -5,7 +5,7 @@ const validation = require('./teachers.validation');
 
 const listTeachers = asyncHandler(async (req, res) => {
   validation.validateListTeachers(req.query);
-  const { employmentStatus, departmentId, page, pageSize } = req.query;
+  const { employmentStatus, page, pageSize } = req.query;
   const {
     teachers,
     total,
@@ -14,7 +14,6 @@ const listTeachers = asyncHandler(async (req, res) => {
   } = await service.listTeachers(
     {
       employmentStatus,
-      departmentId,
       page: page ? Number(page) : undefined,
       pageSize: pageSize ? Number(pageSize) : undefined,
     },
@@ -97,34 +96,6 @@ const updateOwnProfile = asyncHandler(async (req, res) => {
   return sendSuccess(res, { message: 'Profile updated', data: teacher });
 });
 
-// --- Department Reference List (WP4) ----------------------------------------
-
-const listDepartments = asyncHandler(async (req, res) => {
-  validation.validateListDepartments(req.query);
-  const departments = await service.listDepartments(
-    { includeArchived: req.query.includeArchived === 'true' },
-    req.user
-  );
-  return sendSuccess(res, { message: 'Departments retrieved', data: departments });
-});
-
-const createDepartment = asyncHandler(async (req, res) => {
-  validation.validateCreateDepartment(req.body);
-  const department = await service.createDepartment(req.body, req.user);
-  return sendSuccess(res, { statusCode: 201, message: 'Department created', data: department });
-});
-
-const updateDepartment = asyncHandler(async (req, res) => {
-  validation.validateUpdateDepartment(req.body);
-  const department = await service.updateDepartment(req.params.departmentId, req.body, req.user);
-  return sendSuccess(res, { message: 'Department updated', data: department });
-});
-
-const archiveDepartment = asyncHandler(async (req, res) => {
-  const department = await service.archiveDepartment(req.params.departmentId, req.user);
-  return sendSuccess(res, { message: 'Department archived', data: department });
-});
-
 module.exports = {
   listTeachers,
   getTeacherById,
@@ -136,10 +107,6 @@ module.exports = {
   rehire,
   terminate,
   retire,
-  listDepartments,
-  createDepartment,
-  updateDepartment,
-  archiveDepartment,
   getOwnProfile,
   updateOwnProfile,
 };
