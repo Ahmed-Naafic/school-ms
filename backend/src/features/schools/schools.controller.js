@@ -10,6 +10,17 @@ const createSchool = asyncHandler(async (req, res) => {
   return sendSuccess(res, { statusCode: 201, message: 'School created', data: school });
 });
 
+const listSchools = asyncHandler(async (req, res) => {
+  const schools = await service.listSchools();
+  return sendSuccess(res, { message: 'Schools retrieved', data: schools });
+});
+
+const getSchoolById = asyncHandler(async (req, res) => {
+  const school = await service.getSchoolOrThrow(req.params.schoolId);
+  assertSameSchool(req.user, school.id);
+  return sendSuccess(res, { message: 'School retrieved', data: school });
+});
+
 const updateCoreIdentity = asyncHandler(async (req, res) => {
   validation.validateUpdateCoreIdentity(req.body);
   const school = await service.updateCoreIdentity(req.params.schoolId, req.body.name, req.user);
@@ -63,6 +74,8 @@ const getPlatformStatistics = asyncHandler(async (req, res) => {
 
 module.exports = {
   createSchool,
+  listSchools,
+  getSchoolById,
   updateCoreIdentity,
   updateOperationalProfile,
   suspendSchool,

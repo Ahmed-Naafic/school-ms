@@ -1,6 +1,7 @@
 const repository = require('./schools.repository');
 const { ConflictError, NotFoundError } = require('../../shared/errors');
 const { recordAuditEvent } = require('../../shared/audit');
+const { OPERATIONAL_PROFILE_FIELDS } = require('./schools.validation');
 // Cross-feature call through a single, narrow, public interface only, per
 // Decision-Making-Principles' Feature Ownership / Loose Coupling principles
 // and the Technical Design's Architecture section.
@@ -29,7 +30,19 @@ async function createSchool({ name, firstSchoolAdminEmail }, actingUser) {
   // The first School Admin account is created via Authentication &
   // Authorization's own account-creation rules (initial credentials
   // established by the account owner, not this call) — see auth.service.js.
-  await createInitialSchoolAdmin({ email: firstSchoolAdminEmail, schoolId: school.id });
+  // Not a true DB transaction across feature boundaries (would require
+  // passing a shared Prisma client into Auth's service, against Loose
+  // Coupling's narrow-interface principle) — instead, a compensating
+  // rollback: if this fails, the School must not be left behind as a
+  // permanent, admin-less orphan, per the Validation Rules ("A school cannot
+  // be created without its required first School Admin account being
+  // created in the same action").
+  try {
+    await createInitialSchoolAdmin({ email: firstSchoolAdminEmail, schoolId: school.id });
+  } catch (error) {
+    await repository.hardDeleteIncompleteSchool(school.id);
+    throw error;
+  }
 
   await recordAuditEvent({
     schoolId: school.id,
@@ -59,11 +72,21 @@ async function updateCoreIdentity(schoolId, name, actingUser) {
 
 // Business Rule #14: School Admin may update their own school's operational
 // profile information; enforced by the route's assertSameSchool check before
-// this is called.
+// this is called. The field allow-list is re-applied here (in addition to
+// validation) as defense in depth — this service function must never forward
+// an arbitrary client-supplied object straight to Prisma, since that model
+// also has Super-Admin-only fields (name, lifecycleStatus, subscriptionStatus).
 async function updateOperationalProfile(schoolId, fields, actingUser) {
   await getSchoolOrThrow(schoolId);
 
-  const updated = await repository.updateOperationalProfile(schoolId, fields);
+  const safeFields = {};
+  for (const field of OPERATIONAL_PROFILE_FIELDS) {
+    if (fields[field] !== undefined) {
+      safeFields[field] = fields[field];
+    }
+  }
+
+  const updated = await repository.updateOperationalProfile(schoolId, safeFields);
 
   await recordAuditEvent({ schoolId, userId: actingUser.id, action: 'SCHOOL_PROFILE_UPDATED' });
 
@@ -99,6 +122,10 @@ async function reactivateSchool(schoolId, actingUser) {
     );
   }
 
+  if (school.lifecycleStatus === 'ACTIVE') {
+    return school;
+  }
+
   const updated = await repository.updateLifecycleStatus(schoolId, 'ACTIVE');
   await recordAuditEvent({ schoolId, userId: actingUser.id, action: 'SCHOOL_REACTIVATED' });
   return updated;
@@ -107,7 +134,11 @@ async function reactivateSchool(schoolId, actingUser) {
 // Closure is permanent and follows the Archive Before Delete principle: the
 // record is preserved and marked inactive, never deleted.
 async function closeSchool(schoolId, actingUser) {
-  await getSchoolOrThrow(schoolId);
+  const school = await getSchoolOrThrow(schoolId);
+
+  if (school.lifecycleStatus === 'CLOSED') {
+    return school;
+  }
 
   const updated = await repository.updateLifecycleStatus(schoolId, 'CLOSED');
   await recordAuditEvent({ schoolId, userId: actingUser.id, action: 'SCHOOL_CLOSED' });
@@ -148,8 +179,13 @@ function getPlatformStatistics() {
   return repository.getPlatformStatistics();
 }
 
+function listSchools() {
+  return repository.list();
+}
+
 module.exports = {
   createSchool,
+  listSchools,
   updateCoreIdentity,
   updateOperationalProfile,
   suspendSchool,

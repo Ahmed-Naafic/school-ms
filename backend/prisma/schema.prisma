@@ -57,12 +57,87 @@ model School {
   lifecycleStatus    SchoolLifecycleStatus @default(ACTIVE)
   subscriptionStatus SubscriptionStatus    @default(TRIAL)
 
-  accounts Account[]
+  accounts    Account[]
+  classes     Class[]
+  students    Student[]
+  teachers    Teacher[]
+  departments Department[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@map("schools")
+}
+
+// Lifecycle status of a Class or Section, per Class-Management.md.
+// Archiving blocks new Enrollment only — it never affects Students already
+// enrolled and never deletes the record (Business Rule #9).
+enum ClassStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// A Class is a single, evergreen record reused across academic years — never
+// recreated per year (Business Rule #5). The academic year a Student is
+// enrolled for lives entirely on Student Management's Enrollment record, not
+// here.
+model Class {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  // Unique within a school, not platform-wide (Business Rule #3).
+  name String
+
+  // Defines this school's Class order (Business Rule #6). Suggests, but never
+  // enforces, "the next Class" for Student Management's Promotion. Reassigned
+  // as a contiguous 1..N sequence within the school on every reorder, inside a
+  // single transaction, per the Technical Design's Risks section.
+  sequenceOrder Int
+
+  // Exactly one Class per school may hold this flag (Business Rule #7),
+  // additionally enforced by a partial unique index added via raw SQL in this
+  // model's migration, since Prisma's schema DSL cannot express a partial
+  // unique constraint directly.
+  isFinal Boolean @default(false)
+
+  status ClassStatus @default(ACTIVE)
+
+  sections    Section[]
+  enrollments Enrollment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, name])
+  @@unique([schoolId, sequenceOrder])
+  @@index([schoolId])
+  @@map("classes")
+}
+
+// A Section always belongs to exactly one Class (Business Rule #4).
+model Section {
+  id String @id @default(uuid())
+
+  classId String
+  class   Class  @relation(fields: [classId], references: [id])
+
+  // Unique within its Class, not platform-wide.
+  name String
+
+  status ClassStatus @default(ACTIVE)
+
+  // (ACR-002) Read-only from this feature's own perspective — Class
+  // Management never queries this back-relation itself; it exists only so
+  // Prisma can express Enrollment.sectionId's foreign key.
+  enrollments Enrollment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([classId, name])
+  @@map("sections")
 }
 
 model Account {
@@ -79,6 +154,16 @@ model Account {
   role   UserRole
   status AccountStatus @default(ACTIVE)
 
+  // True only while the account's current DEACTIVATED status came from
+  // Authentication & Authorization's own administrative/security override
+  // (ACR-001, Business Rule #25), not from an owning feature's ordinary
+  // employment/enrollment-lifecycle sync. Cleared whenever the account is
+  // reactivated through any path. Exists so an owning feature's own routine
+  // reactivating transition (e.g. Teacher Management's Return from
+  // Leave/Rehire) can refuse to silently undo a deliberate, reason-recorded
+  // security lockdown — Phase 9 code review (Teacher Management) finding.
+  deactivatedByOverride Boolean @default(false)
+
   // Nullable only for Super Admin (Business Rule #2 / Authentication Business Rule #2).
   schoolId String?
   school   School? @relation(fields: [schoolId], references: [id])
@@ -88,6 +173,8 @@ model Account {
   lockedUntil         DateTime?
 
   refreshTokens RefreshToken[]
+  student       Student?
+  teacher       Teacher?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -127,6 +214,188 @@ model PasswordResetToken {
   createdAt DateTime @default(now())
 
   @@map("password_reset_tokens")
+}
+
+// Student lifecycle status, per Student-Management.md.
+// ELIGIBLE_FOR_GRADUATION is a one-way transition written once, at the point
+// of Promotion into the school's final Class — it is never re-derived or
+// revoked by a later change to which Class is designated final (Business
+// Rule #10). Graduation is only reachable from this state, never directly
+// from ACTIVE (Product Owner's Graduation-guard decision).
+enum StudentStatus {
+  ACTIVE
+  ELIGIBLE_FOR_GRADUATION
+  TRANSFERRED
+  WITHDRAWN
+  GRADUATED
+}
+
+// A Student belongs to exactly one school (Business Rule #2) and has exactly
+// one login Account, created via Authentication & Authorization's existing
+// account-creation service at Admission — this model never duplicates
+// credential data, only references the Account that owns it.
+model Student {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  accountId String  @unique
+  account   Account @relation(fields: [accountId], references: [id])
+
+  fullName      String
+  parentName    String?
+  parentContact String?
+
+  status StudentStatus @default(ACTIVE)
+
+  enrollments Enrollment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId])
+  @@index([schoolId, status])
+  @@map("students")
+}
+
+// One Enrollment record per academic year per Student — Promotion always
+// creates a new record rather than mutating the prior one, so Enrollment
+// history is preserved (Business Rule #5). The Student's current Class is
+// derived by querying the most recent Enrollment, not duplicated onto the
+// Student record.
+model Enrollment {
+  id String @id @default(uuid())
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id])
+
+  // References Class Management's Class directly for referential integrity,
+  // per Database-Standards.md — the service layer never queries this
+  // relation directly, though; it only ever reaches Class data through
+  // Class Management's own narrow service interface (getClassById, etc.),
+  // per the Technical Design's Loose Coupling reasoning.
+  classId String
+  class   Class  @relation(fields: [classId], references: [id])
+
+  // (ACR-002) Nullable — set only when the Class is organized into active
+  // Sections (Student-Management.md Business Rule #18). Validated against
+  // classId in the service layer (assertSectionEnrollable), never enforced
+  // here at the database layer, matching how classId's own tenant/status
+  // validity is already enforced in the service layer, not the schema.
+  sectionId String?
+  section   Section? @relation(fields: [sectionId], references: [id])
+
+  academicYear String
+
+  // Only ever set on the outgoing Enrollment record at the point of
+  // Transfer — a Withdrawal never sets this (Business Rules #8, #9).
+  transferSummary String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([studentId])
+  @@map("enrollments")
+}
+
+// A school's own Department reference list, per Teacher-Management.md.
+// Archiving removes an entry from selection without deleting it or
+// invalidating any Teacher record that already references it (Business Rule
+// #9, Archive Before Delete) — never shared across schools.
+enum DepartmentStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model Department {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  // Unique within a school, not platform-wide.
+  name String
+
+  status DepartmentStatus @default(ACTIVE)
+
+  teachers Teacher[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, name])
+  @@index([schoolId])
+  @@map("departments")
+}
+
+// Teacher employment lifecycle, per Teacher-Management.md. Distinct from
+// Account.status (Authentication & Authorization's own field) — the two are
+// related only through the one-directional synchronization this feature's
+// service layer performs at each transition (Business Rule #5, ACR-001).
+// TERMINATED and RETIRED are permanent within this feature (Business Rule #6).
+enum TeacherEmploymentStatus {
+  ACTIVE
+  ON_LEAVE
+  RESIGNED
+  TERMINATED
+  RETIRED
+}
+
+// A Teacher belongs to exactly one school (Business Rule #2) and has exactly
+// one login Account, created via Authentication & Authorization's existing
+// account-creation service at Onboarding — this model never duplicates
+// credential data, only references the Account that owns it.
+model Teacher {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  accountId String  @unique
+  account   Account @relation(fields: [accountId], references: [id])
+
+  // System-generated at Onboarding, immutable thereafter, unique within the
+  // school rather than platform-wide (Business Rule #8). Never accepted on
+  // any update operation — enforced by the update DTO's shape, not only a
+  // runtime check.
+  employeeId String
+
+  fullName String
+
+  // The only fields a Teacher may edit on their own profile via PATCH
+  // /teachers/me (Business Rule #10); School Admin may also edit these plus
+  // every other field below via PATCH /teachers/{id}.
+  contactPhone   String?
+  contactAddress String?
+
+  joiningDate    DateTime
+  employmentType String?
+
+  // Restrict, not the relation's default SetNull: a Department row is only
+  // ever archived (Business Rule #9), never deleted, at the application
+  // layer — this makes an out-of-band deletion fail loudly instead of
+  // silently orphaning the reference, per Database-Standards.md's "protect
+  // against... orphan records" and "cascade operations must be explicitly
+  // considered."
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  qualifications         String?
+  subjectSpecializations String[] @default([])
+  relevantExperience     String?
+
+  // Owned entirely by this feature, distinct from Account.status — see the
+  // enum comment above. Defaults to ACTIVE at Onboarding.
+  employmentStatus TeacherEmploymentStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, employeeId])
+  @@index([schoolId])
+  @@index([schoolId, employmentStatus])
+  @@map("teachers")
 }
 
 // Standard audit record (Tenant, User, Action, Timestamp) per Multi-Tenancy.md.

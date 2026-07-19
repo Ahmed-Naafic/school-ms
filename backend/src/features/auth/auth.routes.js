@@ -38,6 +38,14 @@ router.post(
   controller.createAccount
 );
 
+router.get(
+  '/accounts',
+  authenticate,
+  requireCredentialsEstablished,
+  requireRole('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  controller.listAccounts
+);
+
 router.patch(
   '/accounts/:accountId/deactivate',
   authenticate,

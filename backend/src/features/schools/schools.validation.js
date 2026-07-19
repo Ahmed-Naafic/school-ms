@@ -32,16 +32,27 @@ function validateUpdateCoreIdentity(body) {
   }
 }
 
-function validateUpdateOperationalProfile(body) {
-  // Operational profile fields are all optional; only their types are checked
-  // when present, per School-Management.md's operational-profile scope.
-  const errors = {};
-  const optionalStringFields = ['contactEmail', 'contactPhone', 'address'];
+// Operational profile fields are all optional; only their types are checked
+// when present, per School-Management.md's operational-profile scope. Any
+// other key (e.g. name, lifecycleStatus, subscriptionStatus) is rejected
+// outright — those are Super-Admin-only fields (Business Rule #14), and this
+// endpoint must never accept them from a School Admin, per Security-Standards.md's
+// "never trust client input" and the Technical Design's field-level write
+// restriction being a server-side, not merely client-side, guarantee.
+const OPERATIONAL_PROFILE_FIELDS = ['contactEmail', 'contactPhone', 'address'];
 
-  for (const field of optionalStringFields) {
+function validateUpdateOperationalProfile(body) {
+  const errors = {};
+
+  for (const field of OPERATIONAL_PROFILE_FIELDS) {
     if (body[field] !== undefined && typeof body[field] !== 'string') {
       errors[field] = `${field} must be a string.`;
     }
+  }
+
+  const unknownFields = Object.keys(body).filter((key) => !OPERATIONAL_PROFILE_FIELDS.includes(key));
+  if (unknownFields.length > 0) {
+    errors._unknown = `Unrecognized field(s): ${unknownFields.join(', ')}. Only ${OPERATIONAL_PROFILE_FIELDS.join(', ')} may be updated here.`;
   }
 
   if (Object.keys(errors).length > 0) {
@@ -63,4 +74,5 @@ module.exports = {
   validateUpdateCoreIdentity,
   validateUpdateOperationalProfile,
   validateSubscriptionUpdate,
+  OPERATIONAL_PROFILE_FIELDS,
 };
