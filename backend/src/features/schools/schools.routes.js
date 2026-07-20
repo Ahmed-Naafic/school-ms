@@ -41,5 +41,10 @@ router.patch(
   requireRole('SUPER_ADMIN'),
   controller.updateSubscriptionStatus
 );
+router.patch(
+  '/:schoolId/education-levels',
+  requireRole('SUPER_ADMIN'),
+  controller.updateEducationLevels
+);
 
 module.exports = router;

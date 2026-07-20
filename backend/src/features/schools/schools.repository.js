@@ -47,6 +47,13 @@ function updateSubscriptionStatus(id, subscriptionStatus) {
   return prisma.school.update({ where: { id }, data: { subscriptionStatus } });
 }
 
+// (ACR-003) Always a full replace — the service layer is responsible for
+// ensuring the submitted set never drops a level the school currently holds
+// (no removal support yet); this function just persists whatever it's given.
+function updateEducationLevels(id, educationLevels) {
+  return prisma.school.update({ where: { id }, data: { educationLevels } });
+}
+
 // Aggregate-only counts, per Business Rule #10 — never returns per-school data.
 async function getPlatformStatistics() {
   const [active, suspended, closed] = await Promise.all([
@@ -73,5 +80,6 @@ module.exports = {
   updateOperationalProfile,
   updateLifecycleStatus,
   updateSubscriptionStatus,
+  updateEducationLevels,
   getPlatformStatistics,
 };

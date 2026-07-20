@@ -183,6 +183,43 @@ function listSchools() {
   return repository.list();
 }
 
+// (ACR-003) Business Rule #17: only ever grows the set — a submission that
+// omits a level the school currently holds is rejected as an implicit,
+// unsupported removal, not silently applied. Always a full replace on the
+// wire (the client sends the complete desired set), but persisted only if it
+// is a superset of (or equal to) what the school already has.
+async function updateEducationLevels(schoolId, educationLevels, actingUser) {
+  const school = await getSchoolOrThrow(schoolId);
+
+  const missing = school.educationLevels.filter((level) => !educationLevels.includes(level));
+  if (missing.length > 0) {
+    throw new ConflictError(
+      `Cannot remove Education Level(s) ${missing.join(', ')} — removal is not supported yet.`
+    );
+  }
+
+  const updated = await repository.updateEducationLevels(schoolId, educationLevels);
+
+  await recordAuditEvent({
+    schoolId,
+    userId: actingUser.id,
+    action: 'SCHOOL_EDUCATION_LEVELS_CHANGED',
+    metadata: { previousLevels: school.educationLevels, newLevels: educationLevels },
+  });
+
+  return updated;
+}
+
+// --- Narrow public interface for other features (Subject Management) -------
+// Per this feature's Technical Design Architecture section: read-only, no
+// side effects, the entire surface Subject Management is expected to depend
+// on for validating Subject-to-School assignment.
+
+async function hasEducationLevel(schoolId, level) {
+  const school = await repository.findById(schoolId);
+  return Boolean(school && school.educationLevels.includes(level));
+}
+
 module.exports = {
   createSchool,
   listSchools,
@@ -193,6 +230,8 @@ module.exports = {
   closeSchool,
   reopenSchool,
   updateSubscriptionStatus,
+  updateEducationLevels,
   getPlatformStatistics,
   getSchoolOrThrow,
+  hasEducationLevel,
 };

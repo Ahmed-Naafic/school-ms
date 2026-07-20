@@ -167,3 +167,66 @@ describe('getSchoolOrThrow', () => {
     await expect(service.getSchoolOrThrow('missing')).rejects.toThrow('School not found');
   });
 });
+
+describe('updateEducationLevels (ACR-003, Business Rule #17)', () => {
+  it('allows growing the set of Education Levels', async () => {
+    repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY'] });
+    repository.updateEducationLevels.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY', 'SECONDARY'] });
+
+    await service.updateEducationLevels('s1', ['PRIMARY', 'SECONDARY'], actingUser);
+
+    expect(repository.updateEducationLevels).toHaveBeenCalledWith('s1', ['PRIMARY', 'SECONDARY']);
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'SCHOOL_EDUCATION_LEVELS_CHANGED',
+        metadata: { previousLevels: ['PRIMARY'], newLevels: ['PRIMARY', 'SECONDARY'] },
+      })
+    );
+  });
+
+  it('allows resubmitting the exact same set (idempotent)', async () => {
+    repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY'] });
+    repository.updateEducationLevels.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY'] });
+
+    await service.updateEducationLevels('s1', ['PRIMARY'], actingUser);
+
+    expect(repository.updateEducationLevels).toHaveBeenCalledWith('s1', ['PRIMARY']);
+  });
+
+  it('rejects a submission that would remove a level the school currently has', async () => {
+    repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY', 'SECONDARY'] });
+
+    await expect(service.updateEducationLevels('s1', ['SECONDARY'], actingUser)).rejects.toThrow(
+      'Cannot remove Education Level(s) PRIMARY — removal is not supported yet.'
+    );
+    expect(repository.updateEducationLevels).not.toHaveBeenCalled();
+  });
+
+  it('rejects updating Education Levels for a non-existent school', async () => {
+    repository.findById.mockResolvedValue(null);
+
+    await expect(service.updateEducationLevels('missing', ['PRIMARY'], actingUser)).rejects.toThrow(
+      'School not found'
+    );
+  });
+});
+
+describe('hasEducationLevel (narrow interface for Subject Management)', () => {
+  it('returns true when the school has the level', async () => {
+    repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY', 'SECONDARY'] });
+
+    await expect(service.hasEducationLevel('s1', 'SECONDARY')).resolves.toBe(true);
+  });
+
+  it('returns false when the school does not have the level', async () => {
+    repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY'] });
+
+    await expect(service.hasEducationLevel('s1', 'SECONDARY')).resolves.toBe(false);
+  });
+
+  it('returns false for a non-existent school, never throwing', async () => {
+    repository.findById.mockResolvedValue(null);
+
+    await expect(service.hasEducationLevel('missing', 'PRIMARY')).resolves.toBe(false);
+  });
+});

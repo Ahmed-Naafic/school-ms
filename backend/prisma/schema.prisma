@@ -43,6 +43,15 @@ enum SubscriptionStatus {
   EXPIRED
 }
 
+// (ACR-003) A school's curriculum education levels, per School-Management.md
+// Business Rule #17. Deliberately a small, fixed, platform-wide enum, not a
+// managed reference list — adding a third level is a schema change, not data
+// entry, per "Avoid Premature Abstraction."
+enum EducationLevel {
+  PRIMARY
+  SECONDARY
+}
+
 model School {
   id     String @id @default(uuid())
 
@@ -57,10 +66,19 @@ model School {
   lifecycleStatus    SchoolLifecycleStatus @default(ACTIVE)
   subscriptionStatus SubscriptionStatus    @default(TRIAL)
 
+  // (ACR-003) Core structural information — Super Admin only, same category as
+  // `name`. Never empty; only ever grows (no supported removal path yet, per
+  // Business Rule #17). Defaults to [PRIMARY] — existing rows are backfilled
+  // to this same value by the migration.
+  educationLevels EducationLevel[] @default([PRIMARY])
+
   accounts Account[]
   classes  Class[]
   students Student[]
   teachers Teacher[]
+
+  // (Subject Management) Tenant-scoped Subject assignments — see SchoolSubject.
+  subjectAssignments SchoolSubject[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -356,6 +374,67 @@ model Teacher {
   @@index([schoolId])
   @@index([schoolId, employmentStatus])
   @@map("teachers")
+}
+
+// Subject lifecycle status, per Subject-Management.md. Archiving blocks new
+// School assignment only — it never removes an existing assignment and never
+// deletes the record (Business Rules #4, #5). Same naming convention as
+// ClassStatus (ACTIVE / ARCHIVED).
+enum SubjectStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// Subject is a platform-wide catalog entity, owned by no single school —
+// unlike every other domain entity in this schema (Business Rule #12). Only
+// its assignment to a School (SchoolSubject, below) is tenant-scoped. A
+// Subject's educationLevel is editable only while it has zero School
+// assignments (Business Rule #2) — enforced in the service layer, not here.
+model Subject {
+  id String @id @default(uuid())
+
+  name           String
+  // Reuses the existing EducationLevel enum (ACR-003) — not redefined here.
+  educationLevel EducationLevel
+
+  status SubjectStatus @default(ACTIVE)
+
+  schoolAssignments SchoolSubject[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Scoped per Education Level, not platform-wide (Business Rule #3) — e.g.
+  // "English" (Primary) and "English" (Secondary) are two distinct rows.
+  @@unique([name, educationLevel])
+  @@map("subjects")
+}
+
+// Tenant-scoped assignment of a Subject to a School (Business Rule #6,
+// ACR-003). Soft-removed, never hard-deleted (removedAt/removedById) —
+// re-assigning a previously-removed Subject reactivates the same row rather
+// than inserting a second one for the same (schoolId, subjectId) pair, per
+// the Technical Design's Database Impact reasoning. "Currently assigned"
+// means removedAt IS NULL; every read path filters on this.
+model SchoolSubject {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id])
+
+  assignedAt   DateTime @default(now())
+  assignedById String
+
+  removedAt   DateTime?
+  removedById String?
+
+  @@unique([schoolId, subjectId])
+  @@index([schoolId])
+  @@index([subjectId])
+  @@map("school_subjects")
 }
 
 // Standard audit record (Tenant, User, Action, Timestamp) per Multi-Tenancy.md.

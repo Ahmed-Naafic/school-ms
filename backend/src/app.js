@@ -6,6 +6,7 @@ const schoolsRoutes = require('./features/schools');
 const classesRoutes = require('./features/classes');
 const studentsRoutes = require('./features/students');
 const { teachersRouter } = require('./features/teachers');
+const { subjectsRouter, schoolSubjectsRouter } = require('./features/subjects');
 
 const app = express();
 
@@ -18,6 +19,8 @@ app.use('/api/v1/schools', schoolsRoutes);
 app.use('/api/v1/classes', classesRoutes);
 app.use('/api/v1/students', studentsRoutes);
 app.use('/api/v1/teachers', teachersRouter);
+app.use('/api/v1/subjects', subjectsRouter);
+app.use('/api/v1/schools/:schoolId/subjects', schoolSubjectsRouter);
 
 app.get('/api/v1/health', (req, res) => {
   res.json({ success: true, message: 'OK', data: null, metadata: null });

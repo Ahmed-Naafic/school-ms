@@ -3,6 +3,7 @@ const {
   validateUpdateCoreIdentity,
   validateUpdateOperationalProfile,
   validateSubscriptionUpdate,
+  validateUpdateEducationLevels,
 } = require('./schools.validation');
 
 describe('validateCreateSchool', () => {
@@ -67,5 +68,33 @@ describe('validateSubscriptionUpdate', () => {
 
   it('rejects a missing status', () => {
     expect(() => validateSubscriptionUpdate({})).toThrow();
+  });
+});
+
+describe('validateUpdateEducationLevels (ACR-003)', () => {
+  it.each([[['PRIMARY']], [['SECONDARY']], [['PRIMARY', 'SECONDARY']]])('accepts %j', (levels) => {
+    expect(() => validateUpdateEducationLevels({ educationLevels: levels })).not.toThrow();
+  });
+
+  it('rejects an empty array', () => {
+    expect(() => validateUpdateEducationLevels({ educationLevels: [] })).toThrow(
+      'Invalid Education Level update'
+    );
+  });
+
+  it('rejects a missing educationLevels field', () => {
+    expect(() => validateUpdateEducationLevels({})).toThrow('Invalid Education Level update');
+  });
+
+  it('rejects an invalid Education Level value', () => {
+    expect(() => validateUpdateEducationLevels({ educationLevels: ['TERTIARY'] })).toThrow(
+      'Invalid Education Level update'
+    );
+  });
+
+  it('rejects duplicate values', () => {
+    expect(() => validateUpdateEducationLevels({ educationLevels: ['PRIMARY', 'PRIMARY'] })).toThrow(
+      'Invalid Education Level update'
+    );
   });
 });

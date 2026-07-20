@@ -63,6 +63,14 @@ export const TeachersIcon = (props) => (
   </Icon>
 );
 
+export const SubjectsIcon = (props) => (
+  <Icon {...props}>
+    <path d="M12 3v18" />
+    <path d="M3 6a2 2 0 0 1 2-2h6v16H5a2 2 0 0 1-2-2V6Z" />
+    <path d="M21 6a2 2 0 0 0-2-2h-6v16h6a2 2 0 0 0 2-2V6Z" />
+  </Icon>
+);
+
 
 export const SunIcon = (props) => (
   <Icon {...props}>

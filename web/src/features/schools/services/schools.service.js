@@ -24,3 +24,6 @@ export const reopenSchool = (schoolId) => api.patch(`/schools/${schoolId}/reopen
 
 export const updateSubscriptionStatus = (schoolId, subscriptionStatus) =>
   api.patch(`/schools/${schoolId}/subscription`, { subscriptionStatus });
+
+export const updateEducationLevels = (schoolId, educationLevels) =>
+  api.patch(`/schools/${schoolId}/education-levels`, { educationLevels });

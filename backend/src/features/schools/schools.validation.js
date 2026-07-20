@@ -69,10 +69,38 @@ function validateSubscriptionUpdate(body) {
   }
 }
 
+// (ACR-003) Shape only: non-empty array of valid EducationLevel values, no
+// duplicates. Whether the submission illegally drops a level the school
+// currently holds is data-dependent (requires loading the current record),
+// so that check stays in the service layer, not here — the same
+// validation/service split this project already uses elsewhere (e.g. Teacher
+// Management's Section-belongs-to-Class check).
+const VALID_EDUCATION_LEVELS = ['PRIMARY', 'SECONDARY'];
+
+function validateUpdateEducationLevels(body) {
+  const errors = {};
+
+  if (!Array.isArray(body.educationLevels) || body.educationLevels.length === 0) {
+    errors.educationLevels = 'At least one Education Level is required.';
+  } else {
+    const invalid = body.educationLevels.filter((level) => !VALID_EDUCATION_LEVELS.includes(level));
+    if (invalid.length > 0) {
+      errors.educationLevels = `Invalid Education Level(s): ${invalid.join(', ')}. Must be one of: ${VALID_EDUCATION_LEVELS.join(', ')}.`;
+    } else if (new Set(body.educationLevels).size !== body.educationLevels.length) {
+      errors.educationLevels = 'Education Levels must not contain duplicates.';
+    }
+  }
+
+  if (Object.keys(errors).length > 0) {
+    throw new ValidationError('Invalid Education Level update', errors);
+  }
+}
+
 module.exports = {
   validateCreateSchool,
   validateUpdateCoreIdentity,
   validateUpdateOperationalProfile,
   validateSubscriptionUpdate,
+  validateUpdateEducationLevels,
   OPERATIONAL_PROFILE_FIELDS,
 };

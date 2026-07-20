@@ -233,3 +233,51 @@ describe('full lifecycle: Suspend -> Reactivate -> Close -> Reopen (Business Rul
     expect(res.body.data.subscriptionStatus).toBe('EXPIRED');
   });
 });
+
+describe('Education Levels (ACR-003, Business Rule #17)', () => {
+  it('defaults a newly-created school to [PRIMARY]', async () => {
+    const res = await request(app)
+      .get(`/api/v1/schools/${schoolA.schoolId}`)
+      .set('Authorization', `Bearer ${superAdminToken}`);
+    expect(res.body.data.educationLevels).toEqual(['PRIMARY']);
+  });
+
+  it('rejects a School Admin attempting to change Education Levels', async () => {
+    const res = await request(app)
+      .patch(`/api/v1/schools/${schoolA.schoolId}/education-levels`)
+      .set('Authorization', `Bearer ${schoolA.token}`)
+      .send({ educationLevels: ['PRIMARY', 'SECONDARY'] });
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an empty Education Level set', async () => {
+    const res = await request(app)
+      .patch(`/api/v1/schools/${schoolA.schoolId}/education-levels`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({ educationLevels: [] });
+    expect(res.status).toBe(422);
+  });
+
+  it('Super Admin can grow a school\'s Education Levels', async () => {
+    const res = await request(app)
+      .patch(`/api/v1/schools/${schoolA.schoolId}/education-levels`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({ educationLevels: ['PRIMARY', 'SECONDARY'] });
+    expect(res.status).toBe(200);
+    expect(res.body.data.educationLevels.sort()).toEqual(['PRIMARY', 'SECONDARY']);
+  });
+
+  it('rejects a submission that would remove a currently-held Education Level (regression)', async () => {
+    // schoolA now has [PRIMARY, SECONDARY] from the previous test.
+    const res = await request(app)
+      .patch(`/api/v1/schools/${schoolA.schoolId}/education-levels`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({ educationLevels: ['SECONDARY'] });
+    expect(res.status).toBe(409);
+
+    const check = await request(app)
+      .get(`/api/v1/schools/${schoolA.schoolId}`)
+      .set('Authorization', `Bearer ${superAdminToken}`);
+    expect(check.body.data.educationLevels.sort()).toEqual(['PRIMARY', 'SECONDARY']);
+  });
+});

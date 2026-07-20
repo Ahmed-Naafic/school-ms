@@ -72,6 +72,12 @@ const getPlatformStatistics = asyncHandler(async (req, res) => {
   return sendSuccess(res, { message: 'Platform statistics retrieved', data: stats });
 });
 
+const updateEducationLevels = asyncHandler(async (req, res) => {
+  validation.validateUpdateEducationLevels(req.body);
+  const school = await service.updateEducationLevels(req.params.schoolId, req.body.educationLevels, req.user);
+  return sendSuccess(res, { message: 'Education Levels updated', data: school });
+});
+
 module.exports = {
   createSchool,
   listSchools,
@@ -83,5 +89,6 @@ module.exports = {
   closeSchool,
   reopenSchool,
   updateSubscriptionStatus,
+  updateEducationLevels,
   getPlatformStatistics,
 };

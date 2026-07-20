@@ -11,6 +11,7 @@ import {
   ClassesIcon,
   StudentsIcon,
   TeachersIcon,
+  SubjectsIcon,
   SunIcon,
   MoonIcon,
   MenuIcon,
@@ -22,6 +23,7 @@ import saxaabLogoDark from '../assets/saxaab-logo-dark.png';
 const NAV_LINKS = {
   SUPER_ADMIN: [
     { to: '/schools', label: 'Schools', icon: SchoolsIcon },
+    { to: '/subjects', label: 'Subjects', icon: SubjectsIcon },
     { to: '/platform-statistics', label: 'Platform', icon: PlatformIcon },
     { to: '/accounts', label: 'Accounts', icon: AccountsIcon },
   ],
@@ -29,6 +31,7 @@ const NAV_LINKS = {
     { to: '/students', label: 'Students', icon: StudentsIcon },
     { to: '/teachers', label: 'Teachers', icon: TeachersIcon },
     { to: '/classes', label: 'Classes', icon: ClassesIcon },
+    { to: '/subjects', label: 'Subjects', icon: SubjectsIcon },
     { to: '/accounts', label: 'Accounts', icon: AccountsIcon },
   ],
   ACCOUNTANT: [],
