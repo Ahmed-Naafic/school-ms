@@ -539,35 +539,159 @@ async function performMove(schoolId, ctx, record, targetSlot) {
 // in its own Assignment's domain — directly if a slot is already free, or by
 // recursively repairing one single blocker at a time if depth budget
 // remains. Returns true only once `record` has actually been moved.
+//
+// Repair-chain safety fix (post-Stage-1 incident): a real regeneration run
+// crashed on a Class-slot unique-constraint violation. Root cause — nothing
+// in Stage 1's own (read-only) telemetry, but a pre-existing gap in this
+// function that Stage 1's reordering happened to reach for the first time on
+// real data: with no cycle guard, a mutual-blocker chain (record A's only
+// candidate is blocked by B; B's only candidate is blocked by A) can recurse
+// back into a Lesson whose own relocation is already in progress higher up
+// the SAME call stack. MAX_REPAIR_DEPTH alone does not prevent this — a
+// 2-node cycle fits well inside depth 3. Two independent defenses, per the
+// explicit "do not rely only on depth" requirement:
+//   (1) `budget.inFlight` — a Set of lessonIds currently being relocated
+//       somewhere in this exact chain. Re-entering an in-flight Lesson
+//       returns false immediately instead of recursing into it again.
+//       Scoped to `budget`, which is fresh per top-level attemptRepair
+//       candidate (and per direct relocateLesson call in tests) — never
+//       leaks across independent chains.
+//   (2) A live re-check of the destination's freeness (isDomainSlotFree,
+//       which reads straight from ctx.teacherBusy/ctx.classBusy — the same
+//       Sets every Hard Constraint check uses, so this also re-verifies
+//       Locked/out-of-scope survivors, which occupy those same Sets)
+//       immediately before every performMove this function issues — never
+//       trusting a freeness result computed before the nested recursive
+//       call ran. If the destination is no longer actually free, this
+//       candidate is abandoned (not written) and the domain scan continues.
 async function relocateLesson(schoolId, record, ctx, scopeDays, budget, depth) {
   if (!record.relocatable || record.lessonGroupId) return false;
   if (depth > budget.maxDepth) return false;
 
-  const pseudoUnit = { assignment: record.assignment, subjectPreference: null, isDouble: false };
-  const domain = await getFullDomainSlots(schoolId, pseudoUnit, ctx, scopeDays);
+  if (!budget.inFlight) budget.inFlight = new Set();
+  if (budget.inFlight.has(record.lessonId)) return false; // cycle guard — already being relocated earlier in this chain
+  budget.inFlight.add(record.lessonId);
 
-  for (const candidate of domain) {
-    if (sameSlotAsRecord(candidate, record)) continue;
-    if (budgetExhausted(budget)) return false;
-    spendAttempt(budget);
+  try {
+    const pseudoUnit = { assignment: record.assignment, subjectPreference: null, isDouble: false };
+    const domain = await getFullDomainSlots(schoolId, pseudoUnit, ctx, scopeDays);
 
-    if (isDomainSlotFree(ctx, pseudoUnit, candidate)) {
-      await performMove(schoolId, ctx, record, candidate);
-      return true;
-    }
+    for (const candidate of domain) {
+      if (sameSlotAsRecord(candidate, record)) continue;
+      if (budgetExhausted(budget)) return false;
+      spendAttempt(budget);
 
-    if (depth < budget.maxDepth) {
-      const blockers = getBlockersForSlot(ctx, pseudoUnit, candidate);
-      if (blockers.length === 1 && blockers[0].lessonId !== record.lessonId) {
-        const cleared = await relocateLesson(schoolId, blockers[0], ctx, scopeDays, budget, depth + 1);
-        if (cleared) {
-          await performMove(schoolId, ctx, record, candidate);
-          return true;
+      if (isDomainSlotFree(ctx, pseudoUnit, candidate)) {
+        await performMove(schoolId, ctx, record, candidate);
+        return true;
+      }
+
+      if (depth < budget.maxDepth) {
+        const blockers = getBlockersForSlot(ctx, pseudoUnit, candidate);
+        if (blockers.length === 1 && blockers[0].lessonId !== record.lessonId) {
+          const cleared = await relocateLesson(schoolId, blockers[0], ctx, scopeDays, budget, depth + 1);
+          // Never trust the pre-recursion freeness of `candidate` — the
+          // nested call just mutated ctx. Re-derive it live, right before
+          // the only write this branch is about to make.
+          if (cleared && isDomainSlotFree(ctx, pseudoUnit, candidate)) {
+            await performMove(schoolId, ctx, record, candidate);
+            return true;
+          }
         }
       }
     }
+    return false;
+  } finally {
+    budget.inFlight.delete(record.lessonId);
   }
-  return false;
+}
+
+// --- Telemetry-based candidate ordering ---------------------------------
+// Read-only-experiment finding this implements: attemptRepair's own
+// domain-scan order has no relationship to which candidate is actually
+// cheap to resolve — on the real stress-test School, most of a missing
+// unit's candidates are NOT dead ends (they just need more than the
+// per-candidate budget), and the one that's genuinely cheap can sit
+// anywhere in scan order. Reordering WHICH candidate attemptRepair tries
+// first, using signals available before spending any of the real
+// MAX_REPAIR_ATTEMPTS_PER_CANDIDATE/MAX_TOTAL_REPAIR_ATTEMPTS_PER_UNIT
+// budget, let two of the three real missing Lessons resolve inside the
+// existing 300 total (measured in the read-only experiment this
+// implements).
+//
+// Deliberately NOT included: a recursive depth probe. The same experiment
+// found that a bounded depth-probe signal (try relocating the blocker with
+// a separate, smaller attempts budget purely to rank it) is real search
+// work — it either has to be charged against the same 300 total (defeating
+// its own purpose: spending budget to decide how to spend budget) or it
+// becomes an uncounted, effectively-unbounded second search hiding beside
+// the real one. Every signal below costs exactly one getBlockersForSlot
+// call per slot in the blocker's own domain — the same structural
+// inspection relocateLesson's own domain scan already does, just without
+// ever recursing or touching budget.accounting.
+function computeRepairTelemetry(freeCount, singleBlockerCount, domainSize) {
+  return { freeCount, singleBlockerCount, domainSize };
+}
+
+// One O(domain size) pass over a blocker's own domain — no recursion, no
+// budget spent, no ctx mutation. freeCount is signal (1) (alternative-slot
+// count); domainSize is signal (2) (scarcity — a blocker whose own domain
+// is small has fewer places to ever go, regardless of what's currently
+// occupying them); singleBlockerCount is signal (3) (bounded structural
+// feasibility: how many of its own candidates are just ONE relocation away
+// from resolvable, without ever running that relocation).
+async function measureBlockerTelemetry(schoolId, blockerRecord, ctx, scopeDays) {
+  const pseudoUnit = { assignment: blockerRecord.assignment, isDouble: false };
+  const domain = (await getFullDomainSlots(schoolId, pseudoUnit, ctx, scopeDays)).filter(
+    (slot) => !sameSlotAsRecord(slot, blockerRecord)
+  );
+  let freeCount = 0;
+  let singleBlockerCount = 0;
+  for (const slot of domain) {
+    if (isDomainSlotFree(ctx, pseudoUnit, slot)) {
+      freeCount += 1;
+      continue;
+    }
+    const slotBlockers = getBlockersForSlot(ctx, pseudoUnit, slot);
+    if (slotBlockers.length === 1) singleBlockerCount += 1;
+  }
+  return computeRepairTelemetry(freeCount, singleBlockerCount, domain.length);
+}
+
+// Ranks two (slot, blocker) candidates — lower rank tries first. Priority
+// order: (1) more free alternatives for the blocker, (2) a larger domain
+// for the blocker (less scarce — more room to eventually maneuver even
+// through a chain), (3) more of the blocker's own candidates being only a
+// single relocation away, (4) Soft Preference score as the final
+// tie-break, reusing the exact same scoreCandidate the ordinary placement
+// path already uses (never a new scoring formula). Candidates that tie on
+// every one of these keep their original domain-scan order (a stable sort
+// — Requirement: "existing candidate ordering behavior remains valid where
+// telemetry ties").
+async function rankRepairCandidates(schoolId, unit, candidates, ctx, teacherPreference) {
+  const withTelemetry = [];
+  for (const candidate of candidates) {
+    // A Locked (or otherwise non-relocatable) blocker has no Assignment of
+    // its own to build a domain from, and relocateLesson rejects it
+    // immediately regardless (Hard Constraint #5) — worst-possible
+    // telemetry sends it to the back of the order without ever touching
+    // getFullDomainSlots for a null Assignment.
+    const telemetry = candidate.blocker.relocatable
+      ? await measureBlockerTelemetry(schoolId, candidate.blocker, ctx, candidate.scopeDays)
+      : computeRepairTelemetry(0, 0, 0);
+    const soft = await scoreCandidate(schoolId, candidate.slot, unit, ctx, teacherPreference);
+    withTelemetry.push({ ...candidate, telemetry, soft });
+  }
+  withTelemetry.sort((a, b) => {
+    if (a.telemetry.freeCount !== b.telemetry.freeCount) return b.telemetry.freeCount - a.telemetry.freeCount;
+    if (a.telemetry.domainSize !== b.telemetry.domainSize) return b.telemetry.domainSize - a.telemetry.domainSize;
+    if (a.telemetry.singleBlockerCount !== b.telemetry.singleBlockerCount) {
+      return b.telemetry.singleBlockerCount - a.telemetry.singleBlockerCount;
+    }
+    if (a.soft !== b.soft) return b.soft - a.soft;
+    return a.originalIndex - b.originalIndex; // stable — untouched relative order on a genuine tie
+  });
+  return withTelemetry;
 }
 
 // Top-level entry point — tries to find `unit` (not yet placed; it has no
@@ -580,21 +704,40 @@ async function relocateLesson(schoolId, record, ctx, scopeDays, budget, depth) {
 // MAX_REPAIR_ATTEMPTS_PER_CANDIDATE budget (see this file's own repair
 // configuration comment above for why) — only totalBudget carries over
 // between candidates, as the overall safety cap.
+//
+// Candidate order is no longer the raw domain-scan order: every
+// single-blocker candidate is identified first (exactly as before — no
+// change to which slots qualify, no change to Hard Constraint checks), then
+// ranked by rankRepairCandidates before relocateLesson is ever called on any
+// of them (relocateLesson's own search logic is unchanged by Stage 1 —
+// its only changes are the repair-chain safety fix documented on it above).
 async function attemptRepair(schoolId, unit, ctx, scopeDays) {
   const domain = await getFullDomainSlots(schoolId, unit, ctx, scopeDays);
   const totalBudget = { remaining: MAX_TOTAL_REPAIR_ATTEMPTS_PER_UNIT };
 
+  const singleBlockerCandidates = [];
   for (const slot of domain) {
     if (isDomainSlotFree(ctx, unit, slot)) return slot; // already free — normal candidate path would have found this
-    if (totalBudget.remaining <= 0) return null;
-
     const blockers = getBlockersForSlot(ctx, unit, slot);
     if (blockers.length !== 1) continue; // multi-blocker slot — out of this bounded pass's scope
+    singleBlockerCandidates.push({ slot, blocker: blockers[0], scopeDays, originalIndex: singleBlockerCandidates.length });
+  }
 
+  const teacherPreference = await getTeacherPreference(unit.assignment.teacherId, ctx);
+  const ranked = await rankRepairCandidates(schoolId, unit, singleBlockerCandidates, ctx, teacherPreference);
+
+  for (const { slot, blocker } of ranked) {
+    if (totalBudget.remaining <= 0) return null;
     const budget = { attempts: MAX_REPAIR_ATTEMPTS_PER_CANDIDATE, maxDepth: MAX_REPAIR_DEPTH, total: totalBudget };
     spendAttempt(budget);
-    const cleared = await relocateLesson(schoolId, blockers[0], ctx, scopeDays, budget, 1);
-    if (cleared) return slot;
+    const cleared = await relocateLesson(schoolId, blocker, ctx, scopeDays, budget, 1);
+    // Repair-chain safety fix: `slot` was computed once, before `blocker`'s
+    // own (possibly recursive) relocation ran. Never trust that snapshot as
+    // the final answer — re-derive freeness from the CURRENT ctx immediately
+    // before this is handed back to the caller for an actual placement. If
+    // it is no longer free, this candidate is abandoned and the next ranked
+    // one is tried instead.
+    if (cleared && isDomainSlotFree(ctx, unit, slot)) return slot;
   }
   return null;
 }
@@ -1687,6 +1830,8 @@ module.exports = {
     getFullDomainSlots,
     attemptRepair,
     relocateLesson,
+    measureBlockerTelemetry,
+    rankRepairCandidates,
     slotKey,
     MAX_REPAIR_DEPTH,
     MAX_REPAIR_ATTEMPTS_PER_CANDIDATE,

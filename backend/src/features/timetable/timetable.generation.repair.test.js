@@ -23,6 +23,8 @@ const {
   getFullDomainSlots,
   attemptRepair,
   relocateLesson,
+  measureBlockerTelemetry,
+  rankRepairCandidates,
   slotKey,
   MAX_REPAIR_DEPTH,
   MAX_REPAIR_ATTEMPTS_PER_CANDIDATE,
@@ -309,10 +311,11 @@ describe('MAX_TOTAL_REPAIR_ATTEMPTS_PER_UNIT (the global bound)', () => {
     expect(found).toBeNull();
   });
 
-  it('the SAME scenario also fails via the real (current, 300) attemptRepair — confirms the constant is genuinely back to 300, not silently still 1000', async () => {
+  it('the SAME scenario now SUCCEEDS via the real attemptRepair — Stage 1 telemetry ordering tries the fix candidate (1 free alternative) before the 6 dead ends (0 free alternatives each)', async () => {
     const { ctx, unit } = await buildScenario();
     const slot = await attemptRepair(SCHOOL_ID, unit, ctx, [DAY]);
-    expect(slot).toBeNull();
+    expect(slot).not.toBeNull();
+    expect(slot.period.id).toBe(`p${FIX_SLOT_INDEX}`);
   });
 
   it('the global cap still applies at 300 — an all-dead-end scenario past it still returns null, not an unbounded search', async () => {
@@ -466,8 +469,15 @@ describe('a successful repair never creates a Teacher or Class conflict', () => 
 
     const blocker = record({ lessonId: 'lesson-blocker', teacherId: TA, classId: C_BLOCKER, periodId: 'p0', relocatable: true, assignment: { id: 'tsa-blocker', classId: C_BLOCKER, teacherId: TA } });
     occupySlot(ctx, blocker, DAY, 'p0');
-    // p1 is free for the blocker to escape to; target is free at p0 and p1
-    // is left alone (irrelevant to target).
+    // p1 is free for the BLOCKER to escape to (TA has nothing there). p2 is
+    // locked for the TARGET class specifically, so p0 (via repair) is the
+    // target's only viable path — p1 must stay reachable for the blocker's
+    // own relocation search without also being a direct candidate for the
+    // target itself (Stage 1's own "check already-free before repairing"
+    // ordering would otherwise pick a trivially-free target slot over ever
+    // exercising the relocation this test is actually about).
+    occupySlot(ctx, record({ lessonId: 'target-locked-p1', teacherId: 'teacher-other', classId: C_TARGET, periodId: 'p1', relocatable: false, assignment: null }), DAY, 'p1');
+    occupySlot(ctx, record({ lessonId: 'target-locked-p2', teacherId: 'teacher-other', classId: C_TARGET, periodId: 'p2', relocatable: false, assignment: null }), DAY, 'p2');
     const unit = { assignment: { id: 'tsa-target', classId: C_TARGET, teacherId: TA }, isDouble: false };
 
     const slot = await attemptRepair(SCHOOL_ID, unit, ctx, [DAY]);
@@ -518,5 +528,445 @@ describe('a genuine dead end is still correctly reported as unrepairable', () =>
 
     expect(slot).toBeNull();
     expect(repository.updateLesson).not.toHaveBeenCalled();
+  });
+});
+
+// --- Stage 1: telemetry-based candidate ordering -----------------------------
+// rankRepairCandidates/measureBlockerTelemetry themselves — attemptRepair's
+// own use of them is already exercised throughout the describe blocks above
+// (the repurposed "SAME scenario now SUCCEEDS" test and the tightened
+// relocation-mechanics test). These five specifically cover the ranking
+// signals in isolation, the exact real-world shapes (F3A Biology #1 and #2)
+// the read-only experiment measured, and the safety properties (Locked
+// protection, no Hard Constraint bypass) that must hold no matter what order
+// candidates are tried in.
+describe('Stage 1 — telemetry-based candidate ordering', () => {
+  const TA = 'teacher-TA';
+
+  // Three single-blocker candidates for one target unit, laid out so exactly
+  // ONE (Y) has a real free alternative to escape to — the F3A Biology #1
+  // shape (one uniquely-promising candidate among several structurally
+  // weaker ones). The free slot (p0) is placed at the LOWEST period index in
+  // every blocker's own domain and is reachable by Y in a single, direct
+  // domain-scan step — Y's own relocateLesson search finds it as the very
+  // first candidate it inspects and returns immediately, before ever
+  // consulting getBlockersForSlot for anyone else. This is deliberate: it
+  // keeps the scenario free of a real, pre-existing aliasing hazard in
+  // relocateLesson (X and Z each sit at a slot that is itself one of the
+  // OTHER's domain candidates, which — if the domain scan reached that far —
+  // can recurse back into a Lesson whose own relocation search is already
+  // in progress; relocateLesson is explicitly out of scope for Stage 1 and
+  // is not being touched, so these tests are built to never exercise that
+  // path rather than to probe it).
+  async function buildXYZScenario() {
+    const periods = makePeriods(5); // p0..p4
+    schoolScheduleService.getWorkingDays.mockResolvedValue([DAY]);
+    schoolScheduleService.getShiftPeriods.mockResolvedValue(periods);
+    const ctx = await buildContext(SCHOOL_ID);
+
+    // p0: TA and class-Y are BOTH left free here — Y's one real escape.
+    // Every other blocker's own class is locked-busy here so nobody else
+    // can use it, and the target class is locked-busy here too so
+    // attemptRepair's own already-free check never short-circuits straight
+    // to it.
+    occupySlot(ctx, record({ lessonId: 'x-locked-p0', teacherId: 'teacher-filler', classId: 'class-X', periodId: 'p0', relocatable: false, assignment: null }), DAY, 'p0');
+    occupySlot(ctx, record({ lessonId: 'z-locked-p0', teacherId: 'teacher-filler', classId: 'class-Z', periodId: 'p0', relocatable: false, assignment: null }), DAY, 'p0');
+    occupySlot(ctx, record({ lessonId: 'target-locked-p0', teacherId: 'teacher-filler-target', classId: 'class-target-xyz', periodId: 'p0', relocatable: false, assignment: null }), DAY, 'p0');
+
+    const xRecord = record({ lessonId: 'lesson-X', teacherId: TA, classId: 'class-X', periodId: 'p1', relocatable: true, assignment: { id: 'tsa-X', classId: 'class-X', teacherId: TA } });
+    occupySlot(ctx, xRecord, DAY, 'p1');
+
+    const yRecord = record({ lessonId: 'lesson-Y', teacherId: TA, classId: 'class-Y', periodId: 'p2', relocatable: true, assignment: { id: 'tsa-Y', classId: 'class-Y', teacherId: TA } });
+    occupySlot(ctx, yRecord, DAY, 'p2');
+
+    const zRecord = record({ lessonId: 'lesson-Z', teacherId: TA, classId: 'class-Z', periodId: 'p3', relocatable: true, assignment: { id: 'tsa-Z', classId: 'class-Z', teacherId: TA } });
+    occupySlot(ctx, zRecord, DAY, 'p3');
+
+    // p4: locks out X, Y and Z's own class here too, and the target class —
+    // so none of the four candidates has any escape besides Y's p0, and the
+    // target has no stray fifth direct-free slot.
+    occupySlot(ctx, record({ lessonId: 'x-locked-p4', teacherId: 'teacher-filler', classId: 'class-X', periodId: 'p4', relocatable: false, assignment: null }), DAY, 'p4');
+    occupySlot(ctx, record({ lessonId: 'y-locked-p4', teacherId: 'teacher-filler', classId: 'class-Y', periodId: 'p4', relocatable: false, assignment: null }), DAY, 'p4');
+    occupySlot(ctx, record({ lessonId: 'z-locked-p4', teacherId: 'teacher-filler', classId: 'class-Z', periodId: 'p4', relocatable: false, assignment: null }), DAY, 'p4');
+    occupySlot(ctx, record({ lessonId: 'target-locked-p4', teacherId: 'teacher-filler-target', classId: 'class-target-xyz', periodId: 'p4', relocatable: false, assignment: null }), DAY, 'p4');
+
+    const unit = { assignment: { id: 'tsa-target-xyz', classId: 'class-target-xyz', teacherId: TA }, isDouble: false };
+    return { ctx, unit, xRecord, yRecord, zRecord };
+  }
+
+  it('F3A Biology #1-style: prioritizes the one candidate with a free alternative over structurally weaker candidates, regardless of scan position', async () => {
+    const { ctx, unit, xRecord, yRecord, zRecord } = await buildXYZScenario();
+    const candidates = [
+      { slot: { day: DAY, period: xRecord.periodObj }, blocker: xRecord, scopeDays: [DAY], originalIndex: 0 },
+      { slot: { day: DAY, period: yRecord.periodObj }, blocker: yRecord, scopeDays: [DAY], originalIndex: 1 },
+      { slot: { day: DAY, period: zRecord.periodObj }, blocker: zRecord, scopeDays: [DAY], originalIndex: 2 },
+    ];
+
+    const ranked = await rankRepairCandidates(SCHOOL_ID, unit, candidates, ctx, null);
+
+    expect(ranked[0].blocker.lessonId).toBe('lesson-Y'); // the middle candidate in scan order — genuinely reordered, not just "first wins"
+    expect(ranked[0].telemetry.freeCount).toBe(1);
+    expect(ranked[1].telemetry.freeCount).toBe(0);
+    expect(ranked[2].telemetry.freeCount).toBe(0);
+  });
+
+  // F3A Biology #2-style: no candidate has a free alternative (freeCount and
+  // domainSize tie for both), so the third signal — how many of a blocker's
+  // own candidates are only a single relocation away from resolvable — must
+  // be what breaks the tie, prioritizing the more structurally promising
+  // blocker (P) over the one deeper in genuinely-contested territory (Q).
+  it('F3A Biology #2-style: when no candidate has a free alternative, bounded structural feasibility (single-blocker count) breaks the tie', async () => {
+    const periods = makePeriods(7); // p0..p6
+    schoolScheduleService.getWorkingDays.mockResolvedValue([DAY]);
+    schoolScheduleService.getShiftPeriods.mockResolvedValue(periods);
+    const ctx = await buildContext(SCHOOL_ID);
+
+    const pRecord = record({ lessonId: 'lesson-P', teacherId: TA, classId: 'class-P', periodId: 'p0', relocatable: true, assignment: { id: 'tsa-P', classId: 'class-P', teacherId: TA } });
+    occupySlot(ctx, pRecord, DAY, 'p0');
+    const qRecord = record({ lessonId: 'lesson-Q', teacherId: TA, classId: 'class-Q', periodId: 'p6', relocatable: true, assignment: { id: 'tsa-Q', classId: 'class-Q', teacherId: TA } });
+    occupySlot(ctx, qRecord, DAY, 'p6');
+
+    // TA teaches three other classes at p1/p2/p3 — makes TA busy (shared,
+    // global) at those three slots for BOTH P and Q's own domain checks.
+    ['p1', 'p2', 'p3'].forEach((periodId, i) => {
+      occupySlot(ctx, record({ lessonId: `ta-elsewhere-${i}`, teacherId: TA, classId: `class-ta-elsewhere-${i}`, periodId, relocatable: false, assignment: null }), DAY, periodId);
+    });
+    // class-P is locked-busy only at p4/p5/p6 — free at p1/p2/p3, so those
+    // three TA-busy slots are single-blocker (TA only) for P.
+    ['p4', 'p5', 'p6'].forEach((periodId) => {
+      occupySlot(ctx, record({ lessonId: `p-locked-${periodId}`, teacherId: 'teacher-filler-p', classId: 'class-P', periodId, relocatable: false, assignment: null }), DAY, periodId);
+    });
+    // class-Q is locked-busy at EVERY slot in its own domain — at p1/p2/p3
+    // that makes it two-blocker (TA + class), not single; at p4/p5 (where TA
+    // is free) it's single (class only); at p0 (P's own slot) it's
+    // two-blocker (TA=P + class).
+    ['p0', 'p1', 'p2', 'p3', 'p4', 'p5'].forEach((periodId) => {
+      occupySlot(ctx, record({ lessonId: `q-locked-${periodId}`, teacherId: 'teacher-filler-q', classId: 'class-Q', periodId, relocatable: false, assignment: null }), DAY, periodId);
+    });
+
+    const unit = { assignment: { id: 'tsa-target-pq', classId: 'class-target-pq', teacherId: TA }, isDouble: false };
+    const candidates = [
+      { slot: { day: DAY, period: pRecord.periodObj }, blocker: pRecord, scopeDays: [DAY], originalIndex: 0 },
+      { slot: { day: DAY, period: qRecord.periodObj }, blocker: qRecord, scopeDays: [DAY], originalIndex: 1 },
+    ];
+
+    const ranked = await rankRepairCandidates(SCHOOL_ID, unit, candidates, ctx, null);
+
+    expect(ranked[0].blocker.lessonId).toBe('lesson-P');
+    expect(ranked[0].telemetry).toEqual({ freeCount: 0, singleBlockerCount: 5, domainSize: 6 });
+    expect(ranked[1].blocker.lessonId).toBe('lesson-Q');
+    expect(ranked[1].telemetry).toEqual({ freeCount: 0, singleBlockerCount: 2, domainSize: 6 });
+  });
+
+  it('preserves original scan order when telemetry and Soft Preference score tie exactly (stable sort)', async () => {
+    const periods = makePeriods(2);
+    schoolScheduleService.getWorkingDays.mockResolvedValue([DAY]);
+    schoolScheduleService.getShiftPeriods.mockResolvedValue(periods);
+    const ctx = await buildContext(SCHOOL_ID);
+
+    // Two Locked blockers — both short-circuit to identical worst-possible
+    // telemetry (0,0,0) without any domain computation, and both score 0
+    // (no Teacher/Subject preference, no optimization settings), so nothing
+    // distinguishes them except their original scan order.
+    const lockedA = record({ lessonId: 'locked-A', teacherId: TA, classId: 'class-locked-A', periodId: 'p0', relocatable: false, assignment: null });
+    const lockedB = record({ lessonId: 'locked-B', teacherId: TA, classId: 'class-locked-B', periodId: 'p1', relocatable: false, assignment: null });
+    occupySlot(ctx, lockedA, DAY, 'p0');
+    occupySlot(ctx, lockedB, DAY, 'p1');
+
+    const unit = { assignment: { id: 'tsa-tie', classId: 'class-target-tie', teacherId: TA }, isDouble: false };
+    const candidates = [
+      { slot: { day: DAY, period: lockedA.periodObj }, blocker: lockedA, scopeDays: [DAY], originalIndex: 0 },
+      { slot: { day: DAY, period: lockedB.periodObj }, blocker: lockedB, scopeDays: [DAY], originalIndex: 1 },
+    ];
+
+    const ranked = await rankRepairCandidates(SCHOOL_ID, unit, candidates, ctx, null);
+
+    expect(ranked[0].blocker.lessonId).toBe('locked-A');
+    expect(ranked[1].blocker.lessonId).toBe('locked-B');
+    expect(ranked[0].telemetry).toEqual({ freeCount: 0, singleBlockerCount: 0, domainSize: 0 });
+    expect(ranked[1].telemetry).toEqual(ranked[0].telemetry);
+  });
+
+  it('never ranks a Locked blocker above a relocatable one with a real escape, and never moves or persists it, even though its own slot is scanned first', async () => {
+    const C_TARGET = 'class-target-locked-protect';
+    const C_LOCKED = 'class-locked-owner-2';
+    const C_RELOC = 'class-relocatable-owner';
+    const C_DUMMY = 'class-dummy';
+    const periods = makePeriods(4);
+    schoolScheduleService.getWorkingDays.mockResolvedValue([DAY]);
+    schoolScheduleService.getShiftPeriods.mockResolvedValue(periods);
+    const ctx = await buildContext(SCHOOL_ID);
+
+    // p0: a real Locked Lesson (relocatable: false) — scanned FIRST, and
+    // structurally indistinguishable from a promising candidate unless the
+    // ranking correctly short-circuits it to worst-possible telemetry.
+    const lockedBlocker = record({ lessonId: 'locked-blocker', teacherId: TA, classId: C_LOCKED, periodId: 'p0', relocatable: false, assignment: { id: 'tsa-locked', classId: C_LOCKED, teacherId: TA } });
+    occupySlot(ctx, lockedBlocker, DAY, 'p0');
+
+    // p1: a relocatable blocker with a real escape at p3.
+    const relocBlocker = record({ lessonId: 'reloc-blocker', teacherId: TA, classId: C_RELOC, periodId: 'p1', relocatable: true, assignment: { id: 'tsa-reloc', classId: C_RELOC, teacherId: TA } });
+    occupySlot(ctx, relocBlocker, DAY, 'p1');
+
+    // p2: excluded from target's own single-blocker candidates entirely
+    // (two independent blockers here — TA via a dummy class, and the target
+    // class itself locked by someone else — out of this bounded pass's
+    // scope either way).
+    occupySlot(ctx, record({ lessonId: 'dummy-p2', teacherId: TA, classId: C_DUMMY, periodId: 'p2', relocatable: false, assignment: null }), DAY, 'p2');
+    occupySlot(ctx, record({ lessonId: 'target-locked-p2', teacherId: 'teacher-filler', classId: C_TARGET, periodId: 'p2', relocatable: false, assignment: null }), DAY, 'p2');
+
+    // p3: a third, also-Locked single-blocker candidate for the target — AND
+    // the relocatable blocker's real (TA-free, class-free) escape route.
+    occupySlot(ctx, record({ lessonId: 'target-locked-p3', teacherId: 'teacher-filler', classId: C_TARGET, periodId: 'p3', relocatable: false, assignment: null }), DAY, 'p3');
+
+    const unit = { assignment: { id: 'tsa-target', classId: C_TARGET, teacherId: TA }, isDouble: false };
+    const slot = await attemptRepair(SCHOOL_ID, unit, ctx, [DAY]);
+
+    expect(slot).not.toBeNull();
+    expect(slot.period.id).toBe('p1'); // the relocatable blocker's original candidate slot, now vacated
+    expect(relocBlocker.periodId).toBe('p3'); // relocated to its real escape
+
+    // The Locked blocker: never touched, no matter how the ranking sorted it.
+    expect(lockedBlocker.periodId).toBe('p0');
+    expect(lockedBlocker.dayOfWeek).toBe(DAY);
+    expect(repository.updateLesson).not.toHaveBeenCalledWith('locked-blocker', expect.anything());
+    expect(repository.updateLesson).toHaveBeenCalledWith('reloc-blocker', { dayOfWeek: DAY, periodId: 'p3' });
+  });
+
+  it('a repair resolved via a reordered (non-first-scanned) candidate still leaves the search state fully Hard-Constraint-clean, and inspecting the non-winning candidates never mutates or persists anything', async () => {
+    const { ctx, unit, xRecord, yRecord, zRecord } = await buildXYZScenario();
+
+    const slot = await attemptRepair(SCHOOL_ID, unit, ctx, [DAY]);
+
+    expect(slot).not.toBeNull();
+    expect(slot.period.id).toBe('p2'); // Y's original candidate slot, now vacated
+    // Only Y moved — X and Z were inspected during telemetry ranking (their
+    // own domains were scanned) but never touched.
+    expect(yRecord.periodId).toBe('p0');
+    expect(xRecord.periodId).toBe('p1');
+    expect(zRecord.periodId).toBe('p3');
+    expect(repository.updateLesson).toHaveBeenCalledTimes(1);
+    expect(repository.updateLesson).toHaveBeenCalledWith('lesson-Y', { dayOfWeek: DAY, periodId: 'p0' });
+
+    // Y's new slot: exactly one consistent occupant for both Teacher and Class.
+    expect(ctx.teacherOccupant.get(slotKey(TA, DAY, 'p0'))).toBe(yRecord);
+    expect(ctx.classOccupant.get(slotKey('class-Y', DAY, 'p0'))).toBe(yRecord);
+    // Y's old slot fully vacated — no stale busy/occupant entries left behind.
+    expect(ctx.teacherBusy.has(slotKey(TA, DAY, 'p2'))).toBe(false);
+    expect(ctx.classBusy.has(slotKey('class-Y', DAY, 'p2'))).toBe(false);
+    expect(ctx.classOccupant.has(slotKey('class-Y', DAY, 'p2'))).toBe(false);
+    // X and Z remain correctly registered at their original, untouched slots.
+    expect(ctx.teacherOccupant.get(slotKey(TA, DAY, 'p1'))).toBe(xRecord);
+    expect(ctx.teacherOccupant.get(slotKey(TA, DAY, 'p3'))).toBe(zRecord);
+  });
+});
+
+// --- Repair-chain safety fix: in-flight cycle guard + destination revalidation
+// A real Test School regeneration run under Stage 1 crashed on a Class-slot
+// unique-constraint violation (a genuine attempted double-booking, caught by
+// the DB before it could persist). Root cause: relocateLesson had no guard
+// against recursing back into a Lesson whose own relocation was already in
+// progress higher up the same chain (A's only candidate blocked by B, B's
+// only candidate blocked by A) — MAX_REPAIR_DEPTH=3 does not prevent this,
+// since a 2-node cycle fits well inside it. These tests cover the two
+// independent defenses added: (1) `budget.inFlight`, a per-chain cycle
+// guard; (2) a live re-check of destination freeness immediately before
+// every actual move/placement, never trusting a value computed earlier in
+// the recursion.
+describe('Repair-chain safety fix — in-flight cycle guard and destination revalidation', () => {
+  const TA = 'teacher-TA';
+
+  // A <-> B: A's only domain candidate is blocked by B; B's only domain
+  // candidate is blocked by A. No escape exists for either — the textbook
+  // "A -> B -> A" mutual cycle from the fix's own requirements.
+  async function buildPureCycleScenario() {
+    const periods = makePeriods(2); // p0, p1
+    schoolScheduleService.getWorkingDays.mockResolvedValue([DAY]);
+    schoolScheduleService.getShiftPeriods.mockResolvedValue(periods);
+    const ctx = await buildContext(SCHOOL_ID);
+
+    const aRecord = record({ lessonId: 'lesson-A-cycle', teacherId: TA, classId: 'class-A-cycle', periodId: 'p0', relocatable: true, assignment: { id: 'tsa-A-cycle', classId: 'class-A-cycle', teacherId: TA } });
+    occupySlot(ctx, aRecord, DAY, 'p0');
+    const bRecord = record({ lessonId: 'lesson-B-cycle', teacherId: TA, classId: 'class-B-cycle', periodId: 'p1', relocatable: true, assignment: { id: 'tsa-B-cycle', classId: 'class-B-cycle', teacherId: TA } });
+    occupySlot(ctx, bRecord, DAY, 'p1');
+
+    return { ctx, aRecord, bRecord };
+  }
+
+  // A: A's first candidate (p1, blocked by B) is a pure A<->B cycle with no
+  // escape; A's SECOND candidate (p2, blocked by C) resolves via a genuinely
+  // separate, non-cyclic chain (C escapes directly to p3). B is a dead end
+  // everywhere else (locked), so its own resolution never accidentally
+  // succeeds through some other route — the only thing that ends its search
+  // is the cycle guard.
+  async function buildCyclicPlusEscapeScenario() {
+    const periods = makePeriods(4); // p0..p3
+    schoolScheduleService.getWorkingDays.mockResolvedValue([DAY]);
+    schoolScheduleService.getShiftPeriods.mockResolvedValue(periods);
+    const ctx = await buildContext(SCHOOL_ID);
+
+    const aRecord = record({ lessonId: 'lesson-A', teacherId: TA, classId: 'class-A', periodId: 'p0', relocatable: true, assignment: { id: 'tsa-A', classId: 'class-A', teacherId: TA } });
+    occupySlot(ctx, aRecord, DAY, 'p0');
+    const bRecord = record({ lessonId: 'lesson-B', teacherId: TA, classId: 'class-B', periodId: 'p1', relocatable: true, assignment: { id: 'tsa-B', classId: 'class-B', teacherId: TA } });
+    occupySlot(ctx, bRecord, DAY, 'p1');
+    const cRecord = record({ lessonId: 'lesson-C', teacherId: TA, classId: 'class-C', periodId: 'p2', relocatable: true, assignment: { id: 'tsa-C', classId: 'class-C', teacherId: TA } });
+    occupySlot(ctx, cRecord, DAY, 'p2');
+
+    // B is locked out of every slot except its own cyclic one (p0, blocked
+    // by A) — a genuine, independent dead end that never touches C.
+    occupySlot(ctx, record({ lessonId: 'b-locked-p2', teacherId: 'teacher-filler', classId: 'class-B', periodId: 'p2', relocatable: false, assignment: null }), DAY, 'p2');
+    occupySlot(ctx, record({ lessonId: 'b-locked-p3', teacherId: 'teacher-filler', classId: 'class-B', periodId: 'p3', relocatable: false, assignment: null }), DAY, 'p3');
+    // p3 is left genuinely open (TA free, class-C free) — C's real escape.
+
+    return { ctx, aRecord, bRecord, cRecord };
+  }
+
+  it('A: an A -> B -> A mutual relocation cycle with no escape terminates safely as a failed branch (no crash, no write)', async () => {
+    const { ctx, aRecord, bRecord } = await buildPureCycleScenario();
+    const budget = { attempts: MAX_REPAIR_ATTEMPTS_PER_CANDIDATE, maxDepth: MAX_REPAIR_DEPTH };
+
+    const cleared = await relocateLesson(SCHOOL_ID, aRecord, ctx, [DAY], budget, 1);
+
+    expect(cleared).toBe(false);
+    expect(aRecord.periodId).toBe('p0'); // never moved
+    expect(bRecord.periodId).toBe('p1'); // never moved
+    expect(repository.updateLesson).not.toHaveBeenCalled();
+    // Terminated cheaply — the cyclic re-entry cost nothing beyond the two
+    // domain-scan attempts that discovered it, not a budget blowout.
+    expect(budget.attempts).toBeGreaterThan(MAX_REPAIR_ATTEMPTS_PER_CANDIDATE - 5);
+  });
+
+  it('B: the abandoned cyclic branch is never written — the search safely continues past it to a genuinely different, valid candidate', async () => {
+    const { ctx, aRecord, bRecord, cRecord } = await buildCyclicPlusEscapeScenario();
+    const budget = { attempts: MAX_REPAIR_ATTEMPTS_PER_CANDIDATE, maxDepth: MAX_REPAIR_DEPTH };
+
+    const cleared = await relocateLesson(SCHOOL_ID, aRecord, ctx, [DAY], budget, 1);
+
+    expect(cleared).toBe(true);
+    expect(aRecord.periodId).toBe('p2'); // resolved via C's chain, not the cyclic B candidate
+    expect(cRecord.periodId).toBe('p3');
+    expect(bRecord.periodId).toBe('p1'); // the cyclic candidate: inspected, abandoned, never moved
+    // Exactly two real moves happened — never a third (stale/duplicate) write for B.
+    expect(repository.updateLesson).toHaveBeenCalledTimes(2);
+    expect(repository.updateLesson).toHaveBeenCalledWith('lesson-C', { dayOfWeek: DAY, periodId: 'p3' });
+    expect(repository.updateLesson).toHaveBeenCalledWith('lesson-A', { dayOfWeek: DAY, periodId: 'p2' });
+  });
+
+  it('C: no duplicate/ghost class-slot occupancy is ever produced by a chain that touches a would-be cycle', async () => {
+    const { ctx, aRecord, bRecord, cRecord } = await buildCyclicPlusEscapeScenario();
+    const budget = { attempts: MAX_REPAIR_ATTEMPTS_PER_CANDIDATE, maxDepth: MAX_REPAIR_DEPTH };
+    await relocateLesson(SCHOOL_ID, aRecord, ctx, [DAY], budget, 1);
+
+    // Every moved record's OLD class slot is fully vacated — no leftover
+    // "ghost" occupant left registered at a position the record no longer holds.
+    expect(ctx.classBusy.has(slotKey('class-A', DAY, 'p0'))).toBe(false);
+    expect(ctx.classOccupant.has(slotKey('class-A', DAY, 'p0'))).toBe(false);
+    expect(ctx.classBusy.has(slotKey('class-C', DAY, 'p2'))).toBe(false);
+    expect(ctx.classOccupant.has(slotKey('class-C', DAY, 'p2'))).toBe(false);
+
+    // Every record's own class is occupied at exactly one place: itself, at
+    // its own current (post-move) position — never duplicated, never split.
+    expect(ctx.classOccupant.get(slotKey('class-A', DAY, aRecord.periodId))).toBe(aRecord);
+    expect(ctx.classOccupant.get(slotKey('class-C', DAY, cRecord.periodId))).toBe(cRecord);
+    expect(ctx.classOccupant.get(slotKey('class-B', DAY, bRecord.periodId))).toBe(bRecord);
+  });
+
+  it('D: no Teacher conflict is ever produced by a chain that touches a would-be cycle — each Period has exactly the expected single occupant', async () => {
+    const { ctx, aRecord, bRecord, cRecord } = await buildCyclicPlusEscapeScenario();
+    const budget = { attempts: MAX_REPAIR_ATTEMPTS_PER_CANDIDATE, maxDepth: MAX_REPAIR_DEPTH };
+    await relocateLesson(SCHOOL_ID, aRecord, ctx, [DAY], budget, 1);
+
+    // TA's old slot (p0, A's original position) is fully vacated.
+    expect(ctx.teacherBusy.has(slotKey(TA, DAY, 'p0'))).toBe(false);
+    // TA is busy at exactly p1 (B, untouched), p2 (A, moved here) and p3 (C,
+    // moved here) — one consistent occupant each, never two Lessons sharing
+    // the same Teacher/Day/Period.
+    expect(ctx.teacherOccupant.get(slotKey(TA, DAY, 'p1'))).toBe(bRecord);
+    expect(ctx.teacherOccupant.get(slotKey(TA, DAY, 'p2'))).toBe(aRecord);
+    expect(ctx.teacherOccupant.get(slotKey(TA, DAY, 'p3'))).toBe(cRecord);
+  });
+
+  it('E: a Locked Lesson participating in a would-be cyclic relationship is still never relocated', async () => {
+    const periods = makePeriods(2); // p0, p1
+    schoolScheduleService.getWorkingDays.mockResolvedValue([DAY]);
+    schoolScheduleService.getShiftPeriods.mockResolvedValue(periods);
+    const ctx = await buildContext(SCHOOL_ID);
+
+    const aRecord = record({ lessonId: 'lesson-A-locked-cyc', teacherId: TA, classId: 'class-A-locked-cyc', periodId: 'p0', relocatable: true, assignment: { id: 'tsa-A-locked-cyc', classId: 'class-A-locked-cyc', teacherId: TA } });
+    occupySlot(ctx, aRecord, DAY, 'p0');
+    // A real Locked Lesson survivor (relocatable: false, assignment: null —
+    // exactly as generateTimetable's own survivor pre-load sets up) sits at
+    // A's only other domain slot.
+    const lockedRecord = record({ lessonId: 'locked-lesson-cyc', teacherId: TA, classId: 'class-locked-cyc', periodId: 'p1', relocatable: false, assignment: null });
+    occupySlot(ctx, lockedRecord, DAY, 'p1');
+
+    const budget = { attempts: MAX_REPAIR_ATTEMPTS_PER_CANDIDATE, maxDepth: MAX_REPAIR_DEPTH };
+    const cleared = await relocateLesson(SCHOOL_ID, aRecord, ctx, [DAY], budget, 1);
+
+    expect(cleared).toBe(false); // A's only candidate is Locked — genuinely unrepairable
+    expect(lockedRecord.periodId).toBe('p1');
+    expect(lockedRecord.dayOfWeek).toBe(DAY);
+    expect(aRecord.periodId).toBe('p0');
+    expect(repository.updateLesson).not.toHaveBeenCalled();
+  });
+
+  it('F: existing (non-cyclic) multi-hop repair behavior is unchanged by the safety fix — attemptRepair still resolves a real 2-hop chain end to end', async () => {
+    const TA_F = 'teacher-TA-f';
+    const C_TARGET = 'class-target-f';
+    const periods = makePeriods(3); // p0, p1, p2
+    schoolScheduleService.getWorkingDays.mockResolvedValue([DAY]);
+    schoolScheduleService.getShiftPeriods.mockResolvedValue(periods);
+    const ctx = await buildContext(SCHOOL_ID);
+
+    // link0 (p0) blocks the target's only candidate; link0's own escape (p1)
+    // is blocked by link1; link1's own escape (p2) is genuinely free. A
+    // straight 2-hop chain — link1's own domain naturally includes link0's
+    // CURRENT slot as a candidate too (an incidental cycle-guard hit, not a
+    // real dead end), proving the fix doesn't over-block the common case.
+    const link0 = record({ lessonId: 'link0', teacherId: TA_F, classId: 'class-link0', periodId: 'p0', relocatable: true, assignment: { id: 'tsa-link0', classId: 'class-link0', teacherId: TA_F } });
+    occupySlot(ctx, link0, DAY, 'p0');
+    const link1 = record({ lessonId: 'link1', teacherId: TA_F, classId: 'class-link1', periodId: 'p1', relocatable: true, assignment: { id: 'tsa-link1', classId: 'class-link1', teacherId: TA_F } });
+    occupySlot(ctx, link1, DAY, 'p1');
+    occupySlot(ctx, record({ lessonId: 'link0-locked-p2', teacherId: 'teacher-filler', classId: 'class-link0', periodId: 'p2', relocatable: false, assignment: null }), DAY, 'p2');
+
+    // Target free only at p0; locked everywhere else so this is its one candidate.
+    occupySlot(ctx, record({ lessonId: 'target-locked-p1', teacherId: 'teacher-filler', classId: C_TARGET, periodId: 'p1', relocatable: false, assignment: null }), DAY, 'p1');
+    occupySlot(ctx, record({ lessonId: 'target-locked-p2', teacherId: 'teacher-filler', classId: C_TARGET, periodId: 'p2', relocatable: false, assignment: null }), DAY, 'p2');
+
+    const unit = { assignment: { id: 'tsa-target-f', classId: C_TARGET, teacherId: TA_F }, isDouble: false };
+    const slot = await attemptRepair(SCHOOL_ID, unit, ctx, [DAY]);
+
+    expect(slot).not.toBeNull();
+    expect(slot.period.id).toBe('p0');
+    expect(link0.periodId).toBe('p1');
+    expect(link1.periodId).toBe('p2');
+  });
+
+  it('G: rankRepairCandidates/measureBlockerTelemetry remain fully read-only even when the candidates\' own blockers form a would-be cycle', async () => {
+    const periods = makePeriods(2); // p0, p1
+    schoolScheduleService.getWorkingDays.mockResolvedValue([DAY]);
+    schoolScheduleService.getShiftPeriods.mockResolvedValue(periods);
+    const ctx = await buildContext(SCHOOL_ID);
+
+    const aRecord = record({ lessonId: 'lesson-A-ro', teacherId: TA, classId: 'class-A-ro', periodId: 'p0', relocatable: true, assignment: { id: 'tsa-A-ro', classId: 'class-A-ro', teacherId: TA } });
+    occupySlot(ctx, aRecord, DAY, 'p0');
+    const bRecord = record({ lessonId: 'lesson-B-ro', teacherId: TA, classId: 'class-B-ro', periodId: 'p1', relocatable: true, assignment: { id: 'tsa-B-ro', classId: 'class-B-ro', teacherId: TA } });
+    occupySlot(ctx, bRecord, DAY, 'p1');
+
+    const unit = { assignment: { id: 'tsa-target-ro', classId: 'class-target-ro', teacherId: TA }, isDouble: false };
+    const candidates = [
+      { slot: { day: DAY, period: aRecord.periodObj }, blocker: aRecord, scopeDays: [DAY], originalIndex: 0 },
+      { slot: { day: DAY, period: bRecord.periodObj }, blocker: bRecord, scopeDays: [DAY], originalIndex: 1 },
+    ];
+    const teacherBusyBefore = new Set(ctx.teacherBusy);
+    const classBusyBefore = new Set(ctx.classBusy);
+
+    const ranked = await rankRepairCandidates(SCHOOL_ID, unit, candidates, ctx, null);
+
+    expect(ranked).toHaveLength(2);
+    expect(aRecord.periodId).toBe('p0');
+    expect(bRecord.periodId).toBe('p1');
+    expect(repository.updateLesson).not.toHaveBeenCalled();
+    expect(ctx.teacherBusy).toEqual(teacherBusyBefore);
+    expect(ctx.classBusy).toEqual(classBusyBefore);
   });
 });
