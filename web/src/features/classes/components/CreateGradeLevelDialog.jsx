@@ -1,0 +1,57 @@
+import React from 'react';
+import { Dialog, Input, Select } from '../../../shared/components';
+
+const EDUCATION_LEVEL_OPTIONS = [
+  { value: 'PRIMARY', label: 'Primary' },
+  { value: 'SECONDARY', label: 'Secondary' },
+];
+
+export function CreateGradeLevelDialog({ open, onClose, onCreate }) {
+  const [name, setName] = React.useState('');
+  const [educationLevel, setEducationLevel] = React.useState('PRIMARY');
+  const [error, setError] = React.useState(null);
+  const [submitting, setSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    if (open) {
+      setName('');
+      setEducationLevel('PRIMARY');
+      setError(null);
+    }
+  }, [open]);
+
+  const handleConfirm = async () => {
+    setError(null);
+    setSubmitting(true);
+    try {
+      await onCreate({ name, educationLevel });
+      onClose();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      onConfirm={handleConfirm}
+      title="Create a Grade/Form"
+      description="A Grade/Form groups Classes that share the same year level (e.g. 'Grade 8' groups G8A, G8B, G8C). Education Level determines which Subjects are eligible for its Weekly Subject Allocation."
+      confirmLabel={submitting ? 'Creating…' : 'Create Grade/Form'}
+    >
+      <div className="flex flex-col gap-3">
+        <Input label="Grade/Form name" value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
+        <Select
+          label="Education Level"
+          value={educationLevel}
+          onChange={(e) => setEducationLevel(e.target.value)}
+          options={EDUCATION_LEVEL_OPTIONS}
+        />
+        {error && <p className="text-[13px] text-danger">{error}</p>}
+      </div>
+    </Dialog>
+  );
+}

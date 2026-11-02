@@ -4,6 +4,9 @@ const {
   validateReorderClass,
   validateCreateSection,
   validateUpdateSection,
+  validateCreateGradeLevel,
+  validateUpdateGradeLevel,
+  validateReorderGradeLevel,
 } = require('./classes.validation');
 
 describe('validateCreateClass', () => {
@@ -59,5 +62,83 @@ describe('validateCreateSection / validateUpdateSection', () => {
 
   it('accepts a valid Section name', () => {
     expect(() => validateCreateSection({ name: 'Section A' })).not.toThrow();
+  });
+});
+
+describe('validateCreateClass / validateUpdateClass (ACR-009 — gradeLevelId shape)', () => {
+  it('accepts an omitted gradeLevelId (defaulted in the service layer)', () => {
+    expect(() => validateCreateClass({ name: 'Grade 1' })).not.toThrow();
+  });
+
+  it('accepts a string gradeLevelId', () => {
+    expect(() => validateCreateClass({ name: 'Grade 1', gradeLevelId: 'gl-1' })).not.toThrow();
+  });
+
+  it('rejects a non-string gradeLevelId', () => {
+    expect(() => validateCreateClass({ name: 'Grade 1', gradeLevelId: 123 })).toThrow(
+      'Invalid Class creation request'
+    );
+  });
+});
+
+describe('validateCreateGradeLevel (ACR-009, Architecture Update — Grade/Form)', () => {
+  it('accepts a valid name and educationLevel', () => {
+    expect(() => validateCreateGradeLevel({ name: 'Grade 8', educationLevel: 'PRIMARY' })).not.toThrow();
+  });
+
+  it('rejects a missing name', () => {
+    expect(() => validateCreateGradeLevel({ educationLevel: 'PRIMARY' })).toThrow('Invalid Grade/Form creation request');
+  });
+
+  it('rejects a missing educationLevel', () => {
+    expect(() => validateCreateGradeLevel({ name: 'Grade 8' })).toThrow('Invalid Grade/Form creation request');
+  });
+
+  it('rejects an invalid educationLevel value', () => {
+    expect(() => validateCreateGradeLevel({ name: 'Grade 8', educationLevel: 'TERTIARY' })).toThrow(
+      'Invalid Grade/Form creation request'
+    );
+  });
+});
+
+describe('validateUpdateGradeLevel (Guard by Construction)', () => {
+  it('accepts a valid name-only body (educationLevel omitted means unchanged)', () => {
+    expect(() => validateUpdateGradeLevel({ name: 'Grade 9' })).not.toThrow();
+  });
+
+  it('accepts a corrected educationLevel', () => {
+    expect(() => validateUpdateGradeLevel({ name: 'Grade 9', educationLevel: 'SECONDARY' })).not.toThrow();
+  });
+
+  it('rejects an invalid educationLevel value', () => {
+    expect(() => validateUpdateGradeLevel({ name: 'Grade 9', educationLevel: 'TERTIARY' })).toThrow(
+      'Invalid Grade/Form update request'
+    );
+  });
+
+  it('rejects a missing name', () => {
+    expect(() => validateUpdateGradeLevel({})).toThrow('Invalid Grade/Form update request');
+  });
+
+  it('rejects sequenceOrder in the body', () => {
+    expect(() => validateUpdateGradeLevel({ name: 'Grade 9', sequenceOrder: 3 })).toThrow(
+      'Invalid Grade/Form update request'
+    );
+  });
+
+  it('rejects status in the body', () => {
+    expect(() => validateUpdateGradeLevel({ name: 'Grade 9', status: 'ARCHIVED' })).toThrow(
+      'Invalid Grade/Form update request'
+    );
+  });
+});
+
+describe('validateReorderGradeLevel', () => {
+  it('accepts a positive integer position', () => {
+    expect(() => validateReorderGradeLevel({ position: 1 })).not.toThrow();
+  });
+
+  it('rejects a non-positive position', () => {
+    expect(() => validateReorderGradeLevel({ position: 0 })).toThrow('Invalid sequence update request');
   });
 });

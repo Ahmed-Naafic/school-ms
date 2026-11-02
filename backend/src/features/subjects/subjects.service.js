@@ -158,6 +158,34 @@ async function assignSubjectToSchool(schoolId, subjectId, actingUser) {
   return assignment;
 }
 
+// Bulk-assigns every Active catalog Subject of one Education Level to a
+// School — called by School & Platform Management whenever a school gains
+// that level (including a new school's default level), so a Super Admin only
+// has to uncheck the few Subjects the school doesn't teach instead of
+// assigning each one by hand. The caller must already have persisted the
+// level on the school; this deliberately skips the per-Subject
+// hasEducationLevel re-check for that reason.
+async function assignAllActiveSubjectsOfLevelToSchool(schoolId, educationLevel, actingUser) {
+  const subjects = await repository.listActiveIdsByEducationLevel(educationLevel);
+  if (subjects.length === 0) {
+    return 0;
+  }
+
+  const { count } = await repository.createAssignmentsMany(
+    subjects.map(({ id }) => ({ schoolId, subjectId: id, assignedById: actingUser.id }))
+  );
+
+  if (count > 0) {
+    await recordAuditEvent({
+      schoolId,
+      userId: actingUser.id,
+      action: 'SUBJECTS_BULK_ASSIGNED_TO_SCHOOL',
+      metadata: { educationLevel, count },
+    });
+  }
+  return count;
+}
+
 // --- Dependency-validation extension point (Business Rule #8) --------------
 // A future dependent feature registers its own check here, at its own module
 // load time (every feature module is required by app.js before the server
@@ -195,6 +223,50 @@ async function removeSubjectFromSchool(schoolId, subjectId, actingUser) {
   return removed;
 }
 
+function listAssignmentsOfLevel(schoolId, educationLevel) {
+  return repository
+    .listSchoolAssignments(schoolId)
+    .then((rows) => rows.filter((row) => row.subject.educationLevel === educationLevel));
+}
+
+// Read-only pre-check for School & Platform Management dropping an Education
+// Level: every currently-assigned Subject of that level must itself be
+// removable (Business Rule #8's registered dependency checks), otherwise the
+// level change is refused as a whole. Returns human-readable reasons, empty
+// when the level can be dropped.
+async function findLevelRemovalBlockers(schoolId, educationLevel) {
+  const blockers = [];
+  for (const row of await listAssignmentsOfLevel(schoolId, educationLevel)) {
+    for (const { check } of removalDependencyCheckers) {
+      const reason = await check(schoolId, row.subjectId);
+      if (reason) {
+        blockers.push(`${row.subject.name}: ${reason}`);
+        break;
+      }
+    }
+  }
+  return blockers;
+}
+
+// Unassigns every currently-assigned Subject of one Education Level — the
+// counterpart of assignAllActiveSubjectsOfLevelToSchool, called only after
+// findLevelRemovalBlockers came back empty.
+async function removeAllSubjectsOfLevelFromSchool(schoolId, educationLevel, actingUser) {
+  const rows = await listAssignmentsOfLevel(schoolId, educationLevel);
+  for (const row of rows) {
+    await repository.removeAssignment(row.id, actingUser.id);
+  }
+  if (rows.length > 0) {
+    await recordAuditEvent({
+      schoolId,
+      userId: actingUser.id,
+      action: 'SUBJECTS_BULK_REMOVED_FROM_SCHOOL',
+      metadata: { educationLevel, count: rows.length },
+    });
+  }
+  return rows.length;
+}
+
 // Currently-assigned Subjects for a School, including each Subject's own
 // status (Archived-but-assigned included, per Business Rule #5) — the
 // caller is responsible for its own tenant check (assertSchoolAccessible)
@@ -226,7 +298,10 @@ module.exports = {
   archiveSubject,
   reactivateSubject,
   assignSubjectToSchool,
+  assignAllActiveSubjectsOfLevelToSchool,
   removeSubjectFromSchool,
+  findLevelRemovalBlockers,
+  removeAllSubjectsOfLevelFromSchool,
   listSchoolSubjects,
   getSubjectOrThrow,
   assertSchoolAccessible,

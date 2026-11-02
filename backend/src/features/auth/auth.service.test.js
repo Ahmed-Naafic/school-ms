@@ -655,6 +655,60 @@ describe('createInitialSchoolAdmin email format (regression)', () => {
   });
 });
 
+describe('createInitialSchoolAdmin temporary password', () => {
+  it('stores only the hash of a generated temporary password and returns the raw value once', async () => {
+    repository.findByEmail.mockResolvedValue(null);
+    hashPassword.mockResolvedValue('temp-hash');
+    repository.create.mockResolvedValue({
+      id: 'new-1',
+      email: 'admin@example.com',
+      passwordHash: 'temp-hash',
+      status: 'MUST_CHANGE_CREDENTIALS',
+    });
+
+    const result = await service.createInitialSchoolAdmin({ email: 'admin@example.com', schoolId: 'school-1' });
+
+    expect(result.temporaryPassword).toMatch(/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{12}$/);
+    expect(hashPassword).toHaveBeenCalledWith(result.temporaryPassword);
+    expect(repository.create).toHaveBeenCalledWith(
+      expect.objectContaining({ passwordHash: 'temp-hash', status: 'MUST_CHANGE_CREDENTIALS', role: 'SCHOOL_ADMIN' })
+    );
+    expect(result.account.passwordHash).toBeUndefined();
+  });
+});
+
+describe('resetPasswordAdministratively by Super Admin', () => {
+  const superAdmin = { id: 'super-1', role: 'SUPER_ADMIN', schoolId: null };
+
+  it('resets a School Admin account and returns a temporary password', async () => {
+    repository.findById.mockResolvedValue({ id: 'sa-1', role: 'SCHOOL_ADMIN', schoolId: 'school-1' });
+    hashPassword.mockResolvedValue('temp-hash');
+    repository.resetPasswordAdministratively.mockResolvedValue({
+      id: 'sa-1',
+      role: 'SCHOOL_ADMIN',
+      status: 'MUST_CHANGE_CREDENTIALS',
+      passwordHash: 'temp-hash',
+    });
+
+    const result = await service.resetPasswordAdministratively('sa-1', superAdmin);
+
+    expect(result.temporaryPassword).toMatch(/^[A-Za-z0-9]{12}$/);
+    expect(repository.resetPasswordAdministratively).toHaveBeenCalledWith('sa-1', 'temp-hash');
+    expect(repository.revokeAllRefreshTokensForAccount).toHaveBeenCalledWith('sa-1');
+    expect(result.account.passwordHash).toBeUndefined();
+  });
+
+  it.each(['TEACHER', 'MANAGER', 'ACCOUNTANT', 'STUDENT', 'SUPER_ADMIN'])(
+    'rejects resetting a %s account',
+    async (role) => {
+      repository.findById.mockResolvedValue({ id: 'x-1', role, schoolId: 'school-1' });
+
+      await expect(service.resetPasswordAdministratively('x-1', superAdmin)).rejects.toThrow();
+      expect(repository.resetPasswordAdministratively).not.toHaveBeenCalled();
+    }
+  );
+});
+
 describe('bootstrapSuperAdmin (Business Rule #23 — idempotent)', () => {
   it('creates the first Super Admin when none exists', async () => {
     repository.countActiveSuperAdmins.mockResolvedValue(0);

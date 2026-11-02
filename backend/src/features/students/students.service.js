@@ -8,6 +8,7 @@ const { recordAuditEvent } = require('../../shared/audit');
 // Authentication & Authorization's or Class Management's tables directly.
 const authService = require('../auth/auth.service');
 const classesService = require('../classes/classes.service');
+const academicYearsService = require('../academic-years/academic-years.service');
 
 async function getStudentOrThrow(schoolId, studentId) {
   const student = await repository.findById(studentId);
@@ -56,6 +57,36 @@ async function assertSectionEnrollable(schoolId, classId, sectionId) {
   }
 }
 
+// (ACR-004) Validates an Academic Year reference the same way regardless of
+// caller (Enrollment or Promotion), mirroring assertClassEnrollable and
+// assertSectionEnrollable's existing shared-helper pattern. Business Rule
+// #21: a present academicYearId must resolve to a non-Archived Academic Year
+// belonging to this school (missing, nonexistent, cross-school, and Archived
+// all collapse into "not a valid choice"). Business Rule #22: a school with
+// zero Academic Years has no valid value to supply, so it fails this same
+// check with no separate error path. Reached only through Academic Year
+// Management's own Stable Public Service Interface — never a direct query
+// against its data, per Loose Coupling.
+async function assertAcademicYearEnrollable(schoolId, academicYearId) {
+  if (!academicYearId) {
+    throw new ValidationError('An Academic Year is required', {
+      academicYearId: 'Required — create an Academic Year for your school first if none exists yet.',
+    });
+  }
+
+  const academicYear = await academicYearsService.getAcademicYearById(schoolId, academicYearId);
+  if (!academicYear) {
+    throw new ValidationError('Invalid Academic Year', {
+      academicYearId: 'This Academic Year does not exist for your school.',
+    });
+  }
+  if (academicYear.status === 'ARCHIVED') {
+    throw new ValidationError('Invalid Academic Year', {
+      academicYearId: 'This Academic Year is archived and cannot accept new Enrollment.',
+    });
+  }
+}
+
 async function withEnrollmentDetail(student) {
   const latestEnrollment = await repository.findLatestEnrollment(student.id);
   return { ...student, latestEnrollment };
@@ -93,7 +124,7 @@ async function admitStudent({ email, fullName, parentName, parentContact }, acti
 // ACTIVE Student may be enrolled — a Transferred, Withdrawn, or Graduated
 // Student's permanence (Business Rule #15) would otherwise be bypassed by
 // creating a fresh Enrollment through this endpoint instead of Promotion.
-async function enrollStudent(studentId, { classId, sectionId, academicYear }, actingUser) {
+async function enrollStudent(studentId, { classId, sectionId, academicYearId }, actingUser) {
   const schoolId = actingUser.schoolId;
   const student = await getStudentOrThrow(schoolId, studentId);
 
@@ -103,12 +134,13 @@ async function enrollStudent(studentId, { classId, sectionId, academicYear }, ac
 
   await assertClassEnrollable(schoolId, classId);
   await assertSectionEnrollable(schoolId, classId, sectionId);
+  await assertAcademicYearEnrollable(schoolId, academicYearId);
 
   const enrollment = await repository.createEnrollment({
     studentId: student.id,
     classId,
     sectionId: sectionId || null,
-    academicYear,
+    academicYearId,
   });
 
   await recordAuditEvent({ schoolId, userId: actingUser.id, action: 'STUDENT_ENROLLED' });
@@ -123,7 +155,7 @@ async function enrollStudent(studentId, { classId, sectionId, academicYear }, ac
 // Promotion into the school's final Class transitions the Student into
 // "Eligible for Graduation", a one-way state this feature owns and never
 // re-derives afterward.
-async function promoteStudent(studentId, { classId, sectionId, academicYear }, actingUser) {
+async function promoteStudent(studentId, { classId, sectionId, academicYearId }, actingUser) {
   const schoolId = actingUser.schoolId;
   const student = await getStudentOrThrow(schoolId, studentId);
 
@@ -172,11 +204,24 @@ async function promoteStudent(studentId, { classId, sectionId, academicYear }, a
 
   await assertSectionEnrollable(schoolId, targetClassId, targetSectionId);
 
+  // (ACR-004) Business Rule #23: if the caller didn't explicitly choose an
+  // Academic Year, default to the school's Current Academic Year as a
+  // suggestion only — the chosen value (defaulted or explicit) always still
+  // passes through assertAcademicYearEnrollable below, so the suggestion can
+  // never bypass validation the way an explicit choice wouldn't either.
+  let targetAcademicYearId = academicYearId;
+  if (!targetAcademicYearId) {
+    const current = await academicYearsService.getCurrentAcademicYear(schoolId);
+    targetAcademicYearId = current ? current.id : null;
+  }
+
+  await assertAcademicYearEnrollable(schoolId, targetAcademicYearId);
+
   const enrollment = await repository.createEnrollment({
     studentId,
     classId: targetClassId,
     sectionId: targetSectionId || null,
-    academicYear,
+    academicYearId: targetAcademicYearId,
   });
 
   const finalClass = await classesService.getFinalClass(schoolId);

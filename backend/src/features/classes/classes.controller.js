@@ -68,6 +68,46 @@ const reactivateSection = asyncHandler(async (req, res) => {
   return sendSuccess(res, { message: 'Section reactivated', data: section });
 });
 
+// --- GradeLevel (ACR-009, Architecture Update — Grade/Form) ----------------
+
+const listGradeLevels = asyncHandler(async (req, res) => {
+  const gradeLevels = await service.listGradeLevels(req.user.schoolId, { status: req.query.status });
+  return sendSuccess(res, { message: 'Grade/Forms retrieved', data: gradeLevels });
+});
+
+const getGradeLevelById = asyncHandler(async (req, res) => {
+  const gradeLevel = await service.getGradeLevelOrThrow(req.user.schoolId, req.params.gradeLevelId);
+  return sendSuccess(res, { message: 'Grade/Form retrieved', data: gradeLevel });
+});
+
+const createGradeLevel = asyncHandler(async (req, res) => {
+  validation.validateCreateGradeLevel(req.body);
+  const gradeLevel = await service.createGradeLevel(req.body, req.user);
+  return sendSuccess(res, { statusCode: 201, message: 'Grade/Form created', data: gradeLevel });
+});
+
+const updateGradeLevel = asyncHandler(async (req, res) => {
+  validation.validateUpdateGradeLevel(req.body);
+  const gradeLevel = await service.updateGradeLevel(req.params.gradeLevelId, req.body, req.user);
+  return sendSuccess(res, { message: 'Grade/Form updated', data: gradeLevel });
+});
+
+const reorderGradeLevel = asyncHandler(async (req, res) => {
+  validation.validateReorderGradeLevel(req.body);
+  const gradeLevels = await service.reorderGradeLevel(req.params.gradeLevelId, req.body.position, req.user);
+  return sendSuccess(res, { message: 'Grade/Form sequence updated', data: gradeLevels });
+});
+
+const archiveGradeLevel = asyncHandler(async (req, res) => {
+  const gradeLevel = await service.archiveGradeLevel(req.params.gradeLevelId, req.user);
+  return sendSuccess(res, { message: 'Grade/Form archived', data: gradeLevel });
+});
+
+const reactivateGradeLevel = asyncHandler(async (req, res) => {
+  const gradeLevel = await service.reactivateGradeLevel(req.params.gradeLevelId, req.user);
+  return sendSuccess(res, { message: 'Grade/Form reactivated', data: gradeLevel });
+});
+
 module.exports = {
   listClasses,
   getClassById,
@@ -81,4 +121,11 @@ module.exports = {
   updateSection,
   archiveSection,
   reactivateSection,
+  listGradeLevels,
+  getGradeLevelById,
+  createGradeLevel,
+  updateGradeLevel,
+  reorderGradeLevel,
+  archiveGradeLevel,
+  reactivateGradeLevel,
 };

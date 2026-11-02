@@ -10,7 +10,9 @@ import { TransferStudentDialog } from '../components/TransferStudentDialog';
 import { EditStudentDialog } from '../components/EditStudentDialog';
 import * as studentsService from '../services/students.service';
 import * as classesService from '../../classes/services/classes.service';
+import * as academicYearsService from '../../academic-years/services/academic-years.service';
 import { formatClassSectionName } from '../../classes/utils/format-class-section-name';
+import { formatAcademicYearLabel } from '../../academic-years/utils/format-academic-year-label';
 
 const STATUS_OPTIONS = [
   { value: '', label: 'All statuses' },
@@ -30,6 +32,7 @@ export function StudentsListPage() {
   const [statusFilter, setStatusFilter] = React.useState('');
   const [classFilter, setClassFilter] = React.useState('');
   const [classes, setClasses] = React.useState([]);
+  const [academicYears, setAcademicYears] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
 
   const [admitOpen, setAdmitOpen] = React.useState(false);
@@ -63,6 +66,17 @@ export function StudentsListPage() {
   const classOptions = React.useMemo(
     () => classes.filter((c) => c.status === 'ACTIVE').map((c) => ({ value: c.id, label: c.name })),
     [classes]
+  );
+
+  // (ACR-004) Only non-Archived Academic Years are ever a valid Enrollment/
+  // Promotion target (Business Rule #21), mirroring classOptions' own
+  // ACTIVE-only filter above.
+  const academicYearOptions = React.useMemo(
+    () =>
+      academicYears
+        .filter((ay) => ay.status === 'ACTIVE')
+        .map((ay) => ({ value: ay.id, label: formatAcademicYearLabel(ay.startDate, ay.endDate) })),
+    [academicYears]
   );
 
   // (ACR-002) The roster filter (unlike the Enroll/Promote/Correct Class
@@ -99,7 +113,7 @@ export function StudentsListPage() {
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [studentsResult, classList] = await Promise.all([
+      const [studentsResult, classList, academicYearList] = await Promise.all([
         studentsService.listStudents({
           status: statusFilter || undefined,
           classId: selectedClassSectionFilter?.classId,
@@ -108,9 +122,11 @@ export function StudentsListPage() {
           pageSize: PAGE_SIZE,
         }),
         classesService.listClasses(),
+        academicYearsService.listAcademicYears(),
       ]);
       setStudents(studentsResult);
       setClasses(classList);
+      setAcademicYears(academicYearList);
     } finally {
       setLoading(false);
     }
@@ -352,6 +368,7 @@ export function StudentsListPage() {
         onEnroll={handleEnroll}
         classOptions={classOptions}
         classes={classes}
+        academicYearOptions={academicYearOptions}
       />
       <PromoteStudentDialog
         open={promotingStudent !== null}
@@ -359,6 +376,7 @@ export function StudentsListPage() {
         onPromote={handlePromote}
         classOptions={classOptions}
         classes={classes}
+        academicYearOptions={academicYearOptions}
       />
       <CorrectClassDialog
         open={correctingStudent !== null}

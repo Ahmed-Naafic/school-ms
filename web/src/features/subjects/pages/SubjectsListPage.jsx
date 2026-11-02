@@ -1,13 +1,13 @@
 import React from 'react';
-import { Button, Card, IconButton, Select, Tooltip } from '../../../shared/components';
+import { Button, Card, IconButton, Select, Tabs, Tooltip } from '../../../shared/components';
 import { useToast } from '../../../shared/toast/ToastContext';
 import { SubjectStatusBadge } from '../components/SubjectStatusBadge';
 import { CreateSubjectDialog } from '../components/CreateSubjectDialog';
 import { EditSubjectDialog } from '../components/EditSubjectDialog';
 import * as subjectsService from '../services/subjects.service';
 
-const EDUCATION_LEVEL_OPTIONS = [
-  { value: '', label: 'All Education Levels' },
+const EDUCATION_LEVEL_TABS = [
+  { value: '', label: 'All levels' },
   { value: 'PRIMARY', label: 'Primary' },
   { value: 'SECONDARY', label: 'Secondary' },
 ];
@@ -79,12 +79,8 @@ export function SubjectsListPage() {
         <Button onClick={() => setCreateOpen(true)}>Create Subject</Button>
       </div>
 
-      <div className="mb-4 flex flex-wrap gap-3">
-        <Select
-          value={educationLevelFilter}
-          onChange={(e) => setEducationLevelFilter(e.target.value)}
-          options={EDUCATION_LEVEL_OPTIONS}
-        />
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <Tabs tabs={EDUCATION_LEVEL_TABS} value={educationLevelFilter} onChange={setEducationLevelFilter} />
         <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} options={STATUS_OPTIONS} />
       </div>
 
@@ -92,7 +88,9 @@ export function SubjectsListPage() {
         {loading ? (
           <p className="p-6 text-sm text-gray-500 dark:text-gray-400">Loading…</p>
         ) : subjects.length === 0 ? (
-          <p className="p-6 text-sm text-gray-500 dark:text-gray-400">No Subjects yet.</p>
+          <p className="p-6 text-sm text-gray-500 dark:text-gray-400">
+            {educationLevelFilter || statusFilter ? 'No Subjects match these filters.' : 'No Subjects yet.'}
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">

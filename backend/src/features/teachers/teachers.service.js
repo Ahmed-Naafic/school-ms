@@ -300,8 +300,24 @@ async function updateOwnContactInfo(accountId, { contactPhone, contactAddress })
   return updated;
 }
 
+// --- Stable public service interface for future feature integration -------
+// Per this project's established Stable Public Service Interface contract —
+// every other narrow read interface a feature exposes to another feature
+// (classesService.getClassById, subjectsService.getSubjectById,
+// academicYearsService.getAcademicYearById) returns null on a miss, letting
+// the calling feature decide its own error shape, unlike getTeacherOrThrow
+// above (which throws, and remains unchanged, still used internally by this
+// feature's own routes). Added for Teacher Subject Assignment's own
+// assertTeacherAssignable — an additive, non-breaking interface extension
+// that does not reopen this feature's own Feature Acceptance.
+async function getTeacherById(schoolId, teacherId) {
+  const teacher = await repository.findById(teacherId);
+  return teacher && teacher.schoolId === schoolId ? teacher : null;
+}
+
 module.exports = {
   getTeacherOrThrow,
+  getTeacherById,
   onboardTeacher,
   updateTeacherProfile,
   listTeachers,

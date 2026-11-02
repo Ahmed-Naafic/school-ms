@@ -37,6 +37,98 @@ function todayDateStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// --- Mogadishu business-time helpers (Staff Attendance only, v2.1) ---------
+// (Business Rule #43) This application's operating timezone is permanently
+// Africa/Mogadishu (UTC+3) — not configurable, not a School setting, and not
+// expected to ever vary per school. Staff Attendance Timing Settings
+// (start/late-threshold/absence-cutoff) are entered and interpreted as
+// Mogadishu wall-clock time, so every "what time is it right now, for the
+// purpose of comparing against those settings" computation for Staff
+// Attendance must also read Mogadishu wall-clock time — never
+// Date#toISOString() (always UTC) and never the server process's own OS
+// timezone, which happens to already be Africa/Mogadishu today but is not a
+// guarantee this code should depend on. Stored timestamps themselves
+// (recordedAt, correctedAt, AuditLog.createdAt, etc.) remain ordinary
+// absolute UTC instants in the database, completely unchanged — only the
+// business-time *interpretation* of "now" or of an already-stored instant's
+// time-of-day uses Mogadishu, via Intl.DateTimeFormat against the real IANA
+// zone (so this stays correct against the actual tzdata rather than
+// assuming a hardcoded "+3" that could go stale) never Postgres/driver-level
+// conversion (Coding-Standards.md's "adjustable in FE/BE" project convention
+// does not apply here — see the Business/Technical Design docs' new,
+// explicit statement that this is fixed application-wide, not a rule this
+// feature invents locally).
+//
+// Deliberately separate from toDateOnly/dayOfWeekFor/nowTimeString/
+// todayDateStr above, which remain UTC-based and completely unchanged —
+// those back Teacher/Manager Student attendance's own current-lesson and
+// working-day resolution (Business Lifecycle §1–§4), out of scope for this
+// fix per the Product Owner's explicit instruction not to touch Student
+// Attendance, timetable, TSA, or WSA.
+const MOGADISHU_TIME_ZONE = 'Africa/Mogadishu';
+
+const mogadishuTimeFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: MOGADISHU_TIME_ZONE,
+  hourCycle: 'h23',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
+// "HH:mm" a Mogadishu wall clock would show for the given real instant.
+function mogadishuTimeString(date) {
+  return mogadishuTimeFormatter.format(date);
+}
+
+// "YYYY-MM-DD" a Mogadishu wall clock would show for the given real instant
+// ('en-CA' formats numeric dates as YYYY-MM-DD directly, avoiding a manual
+// part-reassembly step).
+function mogadishuDateStr(date) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: MOGADISHU_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+// The standard Intl-only technique for a named zone's real UTC offset at a
+// given instant: format that instant through the zone, then re-interpret
+// the resulting wall-clock digits AS IF they were themselves UTC — the gap
+// between the two is exactly the zone's offset at that instant. Computed
+// from the live IANA tzdata every time, not a hardcoded constant — Africa/
+// Mogadishu has had a stable +03:00 offset with no DST since 1957, but nothing
+// here assumes that will always be true.
+function mogadishuOffsetMinutes(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: MOGADISHU_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  })
+    .formatToParts(date)
+    .reduce((acc, p) => {
+      acc[p.type] = p.value;
+      return acc;
+    }, {});
+  const asIfUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+  return (asIfUtc - date.getTime()) / 60000;
+}
+
+// The reverse direction: a "YYYY-MM-DD" date and "HH:mm" time, both meant as
+// Mogadishu wall-clock (e.g. a staff member's configured absence cutoff on a
+// specific date), converted to the real absolute instant they refer to.
+// Used only where a wall-clock setting must be compared against `new Date()`
+// (a real instant) — e.g. the read-time ABSENT derivation below.
+function mogadishuWallClockToInstant(dateStr, timeStr) {
+  const naiveUtc = new Date(`${dateStr}T${timeStr}:00.000Z`);
+  const offsetMinutes = mogadishuOffsetMinutes(naiveUtc);
+  return new Date(naiveUtc.getTime() - offsetMinutes * 60000);
+}
+
 // --- Working day / holiday gate (Business Rule #31) ------------------------
 
 async function isSchoolDay(schoolId, dateStr) {
@@ -539,8 +631,14 @@ async function recordSelfArrival(schoolId, actingUser) {
   // the persisted arrival instant drift from the instant status was actually
   // derived against, which would silently break any later recomputation
   // (e.g. Section H.2's Unexcuse action) against the app's own clock.
+  // `arrivalNow` itself is stored as-is (a real, timezone-agnostic absolute
+  // instant, per Business Rule #43) — only `timeStr`/`dateStr` below, which
+  // exist purely to compare against Mogadishu-entered settings, are read as
+  // Mogadishu wall-clock (v2.1 — this was the exact bug: previously read as
+  // raw UTC via toISOString(), which desynced from the settings' intended
+  // meaning whenever the server's own clock wasn't already UTC).
   const arrivalNow = new Date();
-  const timeStr = arrivalNow.toISOString().slice(11, 16);
+  const timeStr = mogadishuTimeString(arrivalNow);
   if (timeStr < startTime) {
     throw new ValidationError('Staff attendance has not opened yet for today', {
       time: 'Before the configured start time',
@@ -549,7 +647,7 @@ async function recordSelfArrival(schoolId, actingUser) {
 
   const source = SELF_ARRIVAL_SOURCE_BY_ROLE[actingUser.role];
   const status = deriveStaffAttendanceStatus(timeStr, lateThreshold);
-  const dateStr = todayDateStr();
+  const dateStr = mogadishuDateStr(arrivalNow);
 
   try {
     const record = await repository.createStaffAttendance({
@@ -580,13 +678,84 @@ async function recordSelfArrival(schoolId, actingUser) {
   }
 }
 
+// (v2.0) Business Rule #42 — a Manager may record arrival ("Come") on behalf
+// of a Teacher or an Accountant, alongside (never replacing) that staff
+// member's own self "Come" (recordSelfArrival above). Scoped identically to
+// the Manager's existing EXCUSED authority: the target-resolution check below
+// is what makes "never another Manager, never an Admin, never cross-school"
+// structural rather than a policy note — those roles/schools simply never
+// appear in listAccountsByRole's result. Shares assertStaffAttendanceTimingConfigured
+// and deriveStaffAttendanceStatus with recordSelfArrival, unduplicated; the
+// only real difference is that the subject (staffAccountId) and the recorder
+// (recordedByAccountId) are genuinely different accounts here, for the first
+// time in this feature's "Come" history.
+async function recordManagerStaffArrival(schoolId, accountId, actingUser) {
+  const targets = await authService.listAccountsByRole(schoolId, ['TEACHER', 'ACCOUNTANT']);
+  const target = targets.find((t) => t.id === accountId);
+  if (!target) {
+    throw new ValidationError('This account is not a valid target for this action', {
+      accountId: 'Invalid account',
+    });
+  }
+
+  const { startTime, lateThreshold } = await assertStaffAttendanceTimingConfigured(schoolId);
+
+  // (v2.1) Same Mogadishu-wall-clock reasoning as recordSelfArrival above —
+  // `arrivalNow` is still stored as the real absolute instant; only the
+  // strings compared against the (Mogadishu-entered) settings are read as
+  // Mogadishu time (Business Rule #43).
+  const arrivalNow = new Date();
+  const timeStr = mogadishuTimeString(arrivalNow);
+  if (timeStr < startTime) {
+    throw new ValidationError('Staff attendance has not opened yet for today', {
+      time: 'Before the configured start time',
+    });
+  }
+
+  const status = deriveStaffAttendanceStatus(timeStr, lateThreshold);
+  const dateStr = mogadishuDateStr(arrivalNow);
+
+  try {
+    const record = await repository.createStaffAttendance({
+      schoolId,
+      staffAccountId: target.id,
+      staffRole: target.role,
+      date: toDateOnly(dateStr),
+      source: 'MANAGER_STAFF_ATTENDANCE',
+      status,
+      recordedByAccountId: actingUser.id,
+      recordedByRole: actingUser.role,
+      recordedAt: arrivalNow,
+    });
+
+    await recordAuditEvent({
+      schoolId,
+      userId: actingUser.id,
+      action: 'STAFF_ATTENDANCE_MANAGER_ARRIVAL_RECORDED',
+      metadata: { staffAccountId: target.id, date: dateStr, status, source: 'MANAGER_STAFF_ATTENDANCE' },
+    });
+
+    return record;
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      throw new ConflictError(`Attendance for today has already been recorded`);
+    }
+    throw err;
+  }
+}
+
 // (v1.9) Business Rule #41 — the normal Excuse action is today-only. A
 // client-supplied date other than today is rejected outright, not silently
 // honored — this is the fix for the exact gap live-testing found: the
 // pre-v1.9 action accepted any syntactically-valid date, past or future,
 // with no legality check at all.
+// (v2.1) "Today" here uses Mogadishu's calendar date (Business Rule #43),
+// not todayDateStr()'s UTC date — Excuse's own "today" must agree with
+// Come's "today" (mogadishuDateStr, above), or a record dated one way could
+// become impossible to Excuse the other way near the UTC/Mogadishu day
+// boundary (21:00-23:59 UTC is already the next calendar day in Mogadishu).
 function assertTodayOnly(dateStr) {
-  const today = todayDateStr();
+  const today = mogadishuDateStr(new Date());
   if (dateStr !== today) {
     throw new ValidationError('Excuse can only be applied for today — use the historical correction action for a past date', {
       date: 'Must be today',
@@ -598,8 +767,9 @@ function assertTodayOnly(dateStr) {
 // Never today (that already has its own action above) and never a future
 // date, under any circumstance: EXCUSED is never allowed for a date that
 // hasn't happened yet, correction or not (Business Rule #41).
+// (v2.1) "Today" is Mogadishu's calendar date, same reasoning as assertTodayOnly.
 function assertPastDateOnly(dateStr) {
-  const today = todayDateStr();
+  const today = mogadishuDateStr(new Date());
   if (!(dateStr < today)) {
     throw new ValidationError('Historical correction requires a date before today', {
       date: dateStr === today ? 'Use the normal Excuse action for today' : 'Future dates are never allowed for Excuse',
@@ -736,7 +906,12 @@ async function unexcuseStaffAttendanceByAccount(schoolId, accountId, dateStr, ac
   if (existing.correctedByAccountId) {
     const settings = await repository.getAttendanceSettings(schoolId);
     const lateThreshold = settings && formatTimeField(settings.staffAttendanceLateThreshold);
-    const arrivalTimeStr = formatTimeField(existing.recordedAt);
+    // (v2.1) existing.recordedAt is a real absolute instant (unlike the
+    // settings fields above, which are naive TIME columns formatTimeField
+    // already reads correctly as-is) — its time-of-day must be read as
+    // Mogadishu wall-clock, not UTC, to recompute against a Mogadishu-entered
+    // late threshold correctly (Business Rule #43).
+    const arrivalTimeStr = mogadishuTimeString(existing.recordedAt);
     const status = deriveStaffAttendanceStatus(arrivalTimeStr, lateThreshold);
 
     const record = await repository.correctStaffAttendance(existing.id, {
@@ -798,7 +973,11 @@ function deriveStaffRosterEntry(account, record, dateStr, settings) {
   let status = 'NOT_RECORDED';
   const absenceCutoff = settings && formatTimeField(settings.staffAttendanceAbsenceCutoff);
   if (absenceCutoff) {
-    const cutoffInstant = new Date(`${dateStr}T${absenceCutoff}:00.000Z`);
+    // (v2.1) absenceCutoff is a Mogadishu wall-clock time (Business Rule
+    // #43) — dateStr@absenceCutoff must be converted to the real absolute
+    // instant it refers to in Mogadishu, not treated as if it were already
+    // UTC, or this derivation fires up to 3 hours early/late.
+    const cutoffInstant = mogadishuWallClockToInstant(dateStr, absenceCutoff);
     if (new Date() > cutoffInstant) {
       status = 'ABSENT';
     }
@@ -930,6 +1109,7 @@ module.exports = {
   deriveStaffAttendanceStatus,
   getManagerStaffAttendanceView,
   recordSelfArrival,
+  recordManagerStaffArrival,
   excuseManagerStaff,
   excuseManagerStaffHistorical,
   unexcuseManagerStaff,

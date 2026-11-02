@@ -2,10 +2,32 @@ const repository = require('./schools.repository');
 const { ConflictError, NotFoundError } = require('../../shared/errors');
 const { recordAuditEvent } = require('../../shared/audit');
 const { OPERATIONAL_PROFILE_FIELDS } = require('./schools.validation');
-// Cross-feature call through a single, narrow, public interface only, per
+// Cross-feature calls through single, narrow, public interfaces only, per
 // Decision-Making-Principles' Feature Ownership / Loose Coupling principles
 // and the Technical Design's Architecture section.
 const { createInitialSchoolAdmin } = require('../auth/auth.service');
+const schoolScheduleService = require('../school-schedule/school-schedule.service');
+const classesService = require('../classes/classes.service');
+
+// Required lazily for the same load-time-cycle reason as timetable.service in
+// createSchool below: subjects.service.js itself requires this module for
+// hasEducationLevel.
+function subjectsService() {
+  return require('../subjects/subjects.service');
+}
+
+// Best-effort: the school/level change has already been committed and is
+// valid on its own, and every Subject can still be assigned by hand — so a
+// failure here is logged, never surfaced as a failed school operation.
+async function autoAssignSubjectsForLevels(schoolId, levels, actingUser) {
+  for (const level of levels) {
+    try {
+      await subjectsService().assignAllActiveSubjectsOfLevelToSchool(schoolId, level, actingUser);
+    } catch (error) {
+      console.error(`Auto-assigning ${level} Subjects to school ${schoolId} failed:`, error);
+    }
+  }
+}
 
 async function getSchoolOrThrow(schoolId) {
   const school = await repository.findById(schoolId);
@@ -19,7 +41,30 @@ async function getSchoolOrThrow(schoolId) {
 // school, and every new school is created together with exactly one initial
 // School Admin account, requiring only the school's name and that account's
 // email.
+// (School Schedule Management) Business Rule #3 there: a default School
+// Calendar and default "Morning" Shift are created together with every new
+// school, atomically with respect to each other but not in a shared cross-
+// feature transaction with this school's own row — the same Loose Coupling
+// reasoning that already keeps createInitialSchoolAdmin a narrow-interface
+// call rather than a shared Prisma transaction. If it fails, the same
+// compensating rollback below covers it: SchoolCalendar/Shift's own
+// `onDelete: Cascade` relation to School (a narrow, deliberate exception to
+// this project's usual RESTRICT convention, since a School is never
+// hard-deleted through ordinary operation) means hardDeleteIncompleteSchool
+// safely cascades away whichever of the two rows, if any, already
+// committed — no separate cleanup call is needed for this feature
+// specifically.
 async function createSchool({ name, firstSchoolAdminEmail }, actingUser) {
+  // Required lazily, inside the function body rather than at module top
+  // level: timetable.service.js requires subjects.service.js, which itself
+  // requires this very module (schools.service.js) for hasEducationLevel —
+  // a top-level require here would create a genuine load-time cycle
+  // (schools -> timetable -> subjects -> schools), the same shape of gap
+  // already resolved once between classes.service.js and school-schedule.
+  // service.js. Requiring lazily here avoids any Node.js module-load
+  // ordering fragility between the two circular top-level requires.
+  const timetableService = require('../timetable/timetable.service');
+
   const existing = await repository.findByName(name);
   if (existing) {
     throw new ConflictError('A school with this name already exists');
@@ -27,9 +72,24 @@ async function createSchool({ name, firstSchoolAdminEmail }, actingUser) {
 
   const school = await repository.create({ name });
 
+  try {
+    await schoolScheduleService.createDefaultScheduleForSchool(school.id, actingUser);
+    await timetableService.createDefaultOptimizationSettingsForSchool(school.id);
+    // (ACR-009, Architecture Update — Grade/Form) The live equivalent of
+    // this feature's own migration backfill — see
+    // classesService.createDefaultGradeLevelForSchool's own comment. Passed
+    // the school's own first configured Education Level (already in scope
+    // here, no new cross-feature call needed).
+    await classesService.createDefaultGradeLevelForSchool(school.id, school.educationLevels[0]);
+  } catch (error) {
+    await repository.hardDeleteIncompleteSchool(school.id);
+    throw error;
+  }
+
   // The first School Admin account is created via Authentication &
-  // Authorization's own account-creation rules (initial credentials
-  // established by the account owner, not this call) — see auth.service.js.
+  // Authorization's own account-creation rules (a generated one-time
+  // temporary password the owner must change on first login) — see
+  // auth.service.js.
   // Not a true DB transaction across feature boundaries (would require
   // passing a shared Prisma client into Auth's service, against Loose
   // Coupling's narrow-interface principle) — instead, a compensating
@@ -37,8 +97,9 @@ async function createSchool({ name, firstSchoolAdminEmail }, actingUser) {
   // permanent, admin-less orphan, per the Validation Rules ("A school cannot
   // be created without its required first School Admin account being
   // created in the same action").
+  let initialAdmin;
   try {
-    await createInitialSchoolAdmin({ email: firstSchoolAdminEmail, schoolId: school.id });
+    initialAdmin = await createInitialSchoolAdmin({ email: firstSchoolAdminEmail, schoolId: school.id });
   } catch (error) {
     await repository.hardDeleteIncompleteSchool(school.id);
     throw error;
@@ -50,7 +111,17 @@ async function createSchool({ name, firstSchoolAdminEmail }, actingUser) {
     action: 'SCHOOL_CREATED',
   });
 
-  return school;
+  await autoAssignSubjectsForLevels(school.id, school.educationLevels, actingUser);
+
+  // Returned to the creating Super Admin exactly once — never retrievable
+  // again; a lost value is recovered only by an administrative password reset.
+  return {
+    ...school,
+    initialSchoolAdmin: {
+      email: firstSchoolAdminEmail,
+      temporaryPassword: initialAdmin.temporaryPassword,
+    },
+  };
 }
 
 // Business Rule #14: only Super Admin changes a school's core identifying
@@ -183,19 +254,27 @@ function listSchools() {
   return repository.list();
 }
 
-// (ACR-003) Business Rule #17: only ever grows the set — a submission that
-// omits a level the school currently holds is rejected as an implicit,
-// unsupported removal, not silently applied. Always a full replace on the
-// wire (the client sends the complete desired set), but persisted only if it
-// is a superset of (or equal to) what the school already has.
+// (ACR-003) Always a full replace on the wire (the client sends the complete
+// desired set). Gaining a level auto-assigns that level's Active Subjects;
+// dropping one unassigns that level's Subjects — refused as a whole if any of
+// them is still in use (e.g. by a Teacher Subject Assignment or a Weekly
+// Subject Allocation), so a level is never dropped out from under live data.
 async function updateEducationLevels(schoolId, educationLevels, actingUser) {
   const school = await getSchoolOrThrow(schoolId);
 
-  const missing = school.educationLevels.filter((level) => !educationLevels.includes(level));
-  if (missing.length > 0) {
+  const removedLevels = school.educationLevels.filter((level) => !educationLevels.includes(level));
+  const blockers = [];
+  for (const level of removedLevels) {
+    blockers.push(...(await subjectsService().findLevelRemovalBlockers(schoolId, level)));
+  }
+  if (blockers.length > 0) {
     throw new ConflictError(
-      `Cannot remove Education Level(s) ${missing.join(', ')} — removal is not supported yet.`
+      `Cannot remove Education Level(s) ${removedLevels.join(', ')} — these Subjects are still in use: ${blockers.join('; ')}`
     );
+  }
+
+  for (const level of removedLevels) {
+    await subjectsService().removeAllSubjectsOfLevelFromSchool(schoolId, level, actingUser);
   }
 
   const updated = await repository.updateEducationLevels(schoolId, educationLevels);
@@ -206,6 +285,9 @@ async function updateEducationLevels(schoolId, educationLevels, actingUser) {
     action: 'SCHOOL_EDUCATION_LEVELS_CHANGED',
     metadata: { previousLevels: school.educationLevels, newLevels: educationLevels },
   });
+
+  const addedLevels = educationLevels.filter((level) => !school.educationLevels.includes(level));
+  await autoAssignSubjectsForLevels(schoolId, addedLevels, actingUser);
 
   return updated;
 }

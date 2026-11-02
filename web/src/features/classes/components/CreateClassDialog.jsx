@@ -1,10 +1,20 @@
 import React from 'react';
 import { Dialog, Input } from '../../../shared/components';
 
+// No Grade/Form picker: the backend assigns a new Class to the school's first
+// Active Grade/Form (classes.service.js createClass). Grade/Form is managed
+// from Settings.
 export function CreateClassDialog({ open, onClose, onCreate }) {
   const [name, setName] = React.useState('');
   const [error, setError] = React.useState(null);
   const [submitting, setSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    if (open) {
+      setName('');
+      setError(null);
+    }
+  }, [open]);
 
   const handleConfirm = async () => {
     setError(null);

@@ -8,6 +8,7 @@ jest.setTimeout(30000);
 let superAdminToken;
 let schoolAToken;
 let schoolBToken;
+let academicYearId;
 const gradeIds = {};
 
 async function createClass(token, name) {
@@ -48,6 +49,16 @@ beforeAll(async () => {
   await request(app)
     .patch(`/api/v1/classes/${gradeIds.g3}/designate-final`)
     .set('Authorization', `Bearer ${schoolAToken}`);
+
+  // (ACR-004) Enrollment/Promotion now require a real Academic Year
+  // reference — one is created up front and reused across every test below,
+  // since these tests exercise Student lifecycle behavior, not Academic Year
+  // Management's own rules (covered by academic-years.routes.test.js).
+  const academicYearRes = await request(app)
+    .post('/api/v1/academic-years')
+    .set('Authorization', `Bearer ${schoolAToken}`)
+    .send({ startDate: '2025-09-01', endDate: '2026-06-30' });
+  academicYearId = academicYearRes.body.data.id;
 });
 
 describe('authentication and permissions', () => {
@@ -106,7 +117,7 @@ describe('Enrollment and archived-Class rejection (Business Rule #9)', () => {
     const res = await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: archivedClassId, academicYear: '2025/2026' });
+      .send({ classId: archivedClassId, academicYearId });
 
     expect(res.status).toBe(409);
   });
@@ -130,7 +141,7 @@ describe('Section reference (ACR-002, Business Rules #18, #19, #20)', () => {
     const res = await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId, academicYear: '2025/2026' });
+      .send({ classId, academicYearId });
 
     expect(res.status).toBe(422);
   });
@@ -145,7 +156,7 @@ describe('Section reference (ACR-002, Business Rules #18, #19, #20)', () => {
     const res = await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId, sectionId, academicYear: '2025/2026' });
+      .send({ classId, sectionId, academicYearId });
 
     expect(res.status).toBe(422);
   });
@@ -162,7 +173,7 @@ describe('Section reference (ACR-002, Business Rules #18, #19, #20)', () => {
     const res = await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId, sectionId, academicYear: '2025/2026' });
+      .send({ classId, sectionId, academicYearId });
 
     expect(res.status).toBe(422);
   });
@@ -181,14 +192,14 @@ describe('Section reference (ACR-002, Business Rules #18, #19, #20)', () => {
     const enrollRes = await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: classA, sectionId: sectionAId, academicYear: '2025/2026' });
+      .send({ classId: classA, sectionId: sectionAId, academicYearId });
     expect(enrollRes.status).toBe(201);
     expect(enrollRes.body.data.sectionId).toBe(sectionAId);
 
     const promoteRes = await request(app)
       .patch(`/api/v1/students/${studentId}/promote`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: classB, academicYear: '2026/2027' });
+      .send({ classId: classB, academicYearId });
 
     expect(promoteRes.status).toBe(200);
     expect(promoteRes.body.data.classId).toBe(classB);
@@ -207,12 +218,12 @@ describe('Section reference (ACR-002, Business Rules #18, #19, #20)', () => {
     await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: classA, sectionId: sectionAId, academicYear: '2025/2026' });
+      .send({ classId: classA, sectionId: sectionAId, academicYearId });
 
     const promoteRes = await request(app)
       .patch(`/api/v1/students/${studentId}/promote`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: classB, academicYear: '2026/2027' });
+      .send({ classId: classB, academicYearId });
 
     expect(promoteRes.status).toBe(422);
   });
@@ -225,7 +236,7 @@ describe('Section reference (ACR-002, Business Rules #18, #19, #20)', () => {
     const res = await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId, academicYear: '2025/2026' });
+      .send({ classId, academicYearId });
 
     expect(res.status).toBe(201);
     expect(res.body.data.sectionId).toBeNull();
@@ -241,14 +252,14 @@ describe('full lifecycle: Enroll -> Promote x2 -> Eligible -> Graduate (Business
     await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g1, academicYear: '2025/2026' });
+      .send({ classId: gradeIds.g1, academicYearId });
   });
 
   it('promotes through the suggested sequence without an explicit Class', async () => {
     const res = await request(app)
       .patch(`/api/v1/students/${studentId}/promote`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ academicYear: '2026/2027' });
+      .send({ academicYearId });
 
     expect(res.status).toBe(200);
     expect(res.body.data.classId).toBe(gradeIds.g2);
@@ -263,7 +274,7 @@ describe('full lifecycle: Enroll -> Promote x2 -> Eligible -> Graduate (Business
     const res = await request(app)
       .patch(`/api/v1/students/${studentId}/promote`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ academicYear: '2027/2028' });
+      .send({ academicYearId });
 
     expect(res.status).toBe(200);
     expect(res.body.data.classId).toBe(gradeIds.g3);
@@ -312,15 +323,15 @@ describe('Class Correction remains available while ELIGIBLE_FOR_GRADUATION (not 
     await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g1, academicYear: '2025/2026' });
+      .send({ classId: gradeIds.g1, academicYearId });
     await request(app)
       .patch(`/api/v1/students/${studentId}/promote`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g2, academicYear: '2026/2027' });
+      .send({ classId: gradeIds.g2, academicYearId });
     await request(app)
       .patch(`/api/v1/students/${studentId}/promote`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g3, academicYear: '2027/2028' });
+      .send({ classId: gradeIds.g3, academicYearId });
 
     const res = await request(app)
       .patch(`/api/v1/students/${studentId}/correct-class`)
@@ -344,7 +355,7 @@ describe('Graduation guard rejects a non-eligible Student (Business Rule #10)', 
     await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g1, academicYear: '2025/2026' });
+      .send({ classId: gradeIds.g1, academicYearId });
 
     const res = await request(app)
       .patch(`/api/v1/students/${studentId}/graduate`)
@@ -361,7 +372,7 @@ describe('Transfer (Business Rules #8, #9, #15)', () => {
     await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g1, academicYear: '2025/2026' });
+      .send({ classId: gradeIds.g1, academicYearId });
 
     const res = await request(app)
       .patch(`/api/v1/students/${studentId}/transfer`)
@@ -392,7 +403,7 @@ describe('Enrollment permanence guard (regression)', () => {
     await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g1, academicYear: '2025/2026' });
+      .send({ classId: gradeIds.g1, academicYearId });
     await request(app)
       .patch(`/api/v1/students/${studentId}/transfer`)
       .set('Authorization', `Bearer ${schoolAToken}`)
@@ -401,7 +412,7 @@ describe('Enrollment permanence guard (regression)', () => {
     const res = await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g2, academicYear: '2026/2027' });
+      .send({ classId: gradeIds.g2, academicYearId });
 
     expect(res.status).toBe(409);
   });
@@ -414,7 +425,7 @@ describe('Withdrawal and Restoration (Business Rule #14 — reversible, unlike T
     await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g1, academicYear: '2025/2026' });
+      .send({ classId: gradeIds.g1, academicYearId });
 
     const withdrawRes = await request(app)
       .patch(`/api/v1/students/${studentId}/withdraw`)
@@ -452,11 +463,11 @@ describe('Class filter regression — matches current Enrollment only', () => {
     await request(app)
       .post(`/api/v1/students/${studentId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g1, academicYear: '2025/2026' });
+      .send({ classId: gradeIds.g1, academicYearId });
     await request(app)
       .patch(`/api/v1/students/${studentId}/promote`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId: gradeIds.g2, academicYear: '2026/2027' });
+      .send({ classId: gradeIds.g2, academicYearId });
 
     const filteredByG1 = await request(app)
       .get(`/api/v1/students?classId=${gradeIds.g1}`)
@@ -493,13 +504,13 @@ describe('Section filter (ACR-002)', () => {
     await request(app)
       .post(`/api/v1/students/${studentAId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId, sectionId: sectionAId, academicYear: '2025/2026' });
+      .send({ classId, sectionId: sectionAId, academicYearId });
 
     const studentBId = await admitStudent(schoolAToken, `section-filter-b-${suffix}@example.com`, 'Section Filter B');
     await request(app)
       .post(`/api/v1/students/${studentBId}/enrollments`)
       .set('Authorization', `Bearer ${schoolAToken}`)
-      .send({ classId, sectionId: sectionBId, academicYear: '2025/2026' });
+      .send({ classId, sectionId: sectionBId, academicYearId });
 
     const filteredByClassOnly = await request(app)
       .get(`/api/v1/students?classId=${classId}`)

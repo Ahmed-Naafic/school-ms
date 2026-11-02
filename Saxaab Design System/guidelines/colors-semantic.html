@@ -1,0 +1,15 @@
+<!-- @dsCard group="Colors" viewport="700x140" name="Semantic colors" subtitle="Success, warning, danger, info + tinted backgrounds" -->
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>body{margin:0;padding:16px;background:var(--surface-card);font-family:var(--font-body)} a{color:var(--link)}a:hover{color:var(--link-hover)}
+.row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.chip{border-radius:var(--radius-md);padding:14px;display:flex;flex-direction:column;gap:6px}
+.chip b{font-size:13px;font-weight:700}.chip span{font-size:11px}</style></head>
+<body>
+<div class="row">
+  <div class="chip" style="background:var(--success-bg);color:var(--success)"><b>Success</b><span>#24906a on #e2f3ec</span></div>
+  <div class="chip" style="background:var(--warning-bg);color:var(--warning)"><b>Warning</b><span>#cf8b28 on #fbeedb</span></div>
+  <div class="chip" style="background:var(--danger-bg);color:var(--danger)"><b>Danger</b><span>#cf4444 on #fae5e5</span></div>
+  <div class="chip" style="background:var(--info-bg);color:var(--info)"><b>Info</b><span>#24507c on #eef3f7</span></div>
+</div>
+</body></html>

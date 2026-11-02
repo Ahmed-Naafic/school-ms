@@ -1,5 +1,5 @@
 import React from 'react';
-import { Button, Card } from '../../../shared/components';
+import { Card } from '../../../shared/components';
 import { useToast } from '../../../shared/toast/ToastContext';
 import { AttendanceStatusDot } from '../components/AttendanceStatusDot';
 import * as attendanceService from '../services/attendance.service';
@@ -69,9 +69,16 @@ export function StaffCheckInPage() {
         ) : (
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-gray-500 dark:text-gray-400">You haven't checked in yet today.</p>
-            <Button onClick={handleComeIn} disabled={checking}>
-              {checking ? 'Checking in…' : 'Come'}
-            </Button>
+            <button
+              type="button"
+              onClick={handleComeIn}
+              disabled={checking}
+              aria-label={checking ? 'Checking in…' : 'Check in now'}
+              title={checking ? 'Checking in…' : 'Check in now'}
+              className="flex-none rounded-full transition-opacity duration-fast ease-out-brand hover:opacity-70 disabled:opacity-50"
+            >
+              <AttendanceStatusDot status={null} filled={false} size="md" />
+            </button>
           </div>
         )}
       </Card>

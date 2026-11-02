@@ -85,6 +85,17 @@ function listSchoolAssignments(schoolId) {
   });
 }
 
+function listActiveIdsByEducationLevel(educationLevel) {
+  return prisma.subject.findMany({ where: { educationLevel, status: 'ACTIVE' }, select: { id: true } });
+}
+
+// skipDuplicates leaves any existing row for the (schoolId, subjectId) pair
+// untouched — including a soft-removed one, so a Subject the school had
+// explicitly removed earlier is never silently re-assigned by a bulk call.
+function createAssignmentsMany(rows) {
+  return prisma.schoolSubject.createMany({ data: rows, skipDuplicates: true });
+}
+
 module.exports = {
   findById,
   findByNameAndEducationLevel,
@@ -99,4 +110,6 @@ module.exports = {
   reactivateAssignment,
   removeAssignment,
   listSchoolAssignments,
+  listActiveIdsByEducationLevel,
+  createAssignmentsMany,
 };

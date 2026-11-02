@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Button, Card } from '../../../shared/components';
+import { Button, Card, Dialog } from '../../../shared/components';
 import { useToast } from '../../../shared/toast/ToastContext';
 import { SchoolStatusBadge } from '../components/SchoolStatusBadge';
 import { CreateSchoolDialog } from '../components/CreateSchoolDialog';
@@ -11,6 +11,9 @@ export function SchoolsListPage() {
   const [schools, setSchools] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [dialogOpen, setDialogOpen] = React.useState(false);
+  // The first School Admin's one-time temporary password — shown in a dialog
+  // (not a toast, which auto-dismisses) since it is never retrievable again.
+  const [initialAdminCredentials, setInitialAdminCredentials] = React.useState(null);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -26,8 +29,11 @@ export function SchoolsListPage() {
   }, [load]);
 
   const handleCreate = async (data) => {
-    await schoolsService.createSchool(data);
+    const school = await schoolsService.createSchool(data);
     showToast({ tone: 'success', title: 'School created' });
+    if (school.initialSchoolAdmin?.temporaryPassword) {
+      setInitialAdminCredentials(school.initialSchoolAdmin);
+    }
     load();
   };
 
@@ -79,6 +85,27 @@ export function SchoolsListPage() {
       </Card>
 
       <CreateSchoolDialog open={dialogOpen} onClose={() => setDialogOpen(false)} onCreate={handleCreate} />
+
+      <Dialog
+        open={initialAdminCredentials !== null}
+        title="School Admin login credentials"
+        description="Share these with the School Admin directly — the password will not be shown again. They must set their own password the first time they log in."
+        cancelLabel="Done"
+        onClose={() => setInitialAdminCredentials(null)}
+      >
+        <dl className="flex flex-col gap-2 text-sm">
+          <div>
+            <dt className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">Email</dt>
+            <dd className="font-mono text-navy-900 dark:text-white">{initialAdminCredentials?.email}</dd>
+          </div>
+          <div>
+            <dt className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">Temporary password</dt>
+            <dd className="rounded-md border border-gray-300 bg-gray-50 px-4 py-3 text-center font-mono text-lg font-bold tracking-wide text-navy-900 dark:border-gray-500 dark:bg-navy-800 dark:text-white">
+              {initialAdminCredentials?.temporaryPassword}
+            </dd>
+          </div>
+        </dl>
+      </Dialog>
     </div>
   );
 }

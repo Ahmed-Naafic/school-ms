@@ -22,7 +22,9 @@ function validateLogin(body) {
   }
 }
 
-const VALID_ROLES = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'ACCOUNTANT', 'TEACHER', 'STUDENT'];
+// MANAGER added by ACR-010 — shape-level only; auth.service.js's own
+// role-creation matrix still enforces WHO may create one.
+const VALID_ROLES = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'ACCOUNTANT', 'TEACHER', 'STUDENT', 'MANAGER'];
 
 function validateCreateAccount(body) {
   const errors = {};

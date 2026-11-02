@@ -10,6 +10,7 @@
 // of the login budget.
 const { app, request, loginSuperAdmin, createTestSchoolAdmin, uniqueSuffix } = require('../../shared/test-helpers');
 const prisma = require('../../config/database');
+const { hashPassword } = require('../../shared/password');
 
 jest.setTimeout(30000);
 
@@ -37,6 +38,16 @@ beforeAll(async () => {
     adminEmail: secondSchoolAdminEmail,
     password: secondSchoolAdminPassword,
   });
+
+  // createTestSchoolAdmin returns only { token, schoolId } — ACR-011's own
+  // tests need each School Admin's own accountId too (to target/assert
+  // against it directly), fetched once here rather than re-queried per test.
+  const schoolAdminAccount = await prisma.account.findFirst({ where: { schoolId: schoolAdmin.schoolId, role: 'SCHOOL_ADMIN' } });
+  schoolAdmin.accountId = schoolAdminAccount.id;
+  const secondSchoolAdminAccount = await prisma.account.findFirst({
+    where: { schoolId: secondSchoolAdmin.schoolId, role: 'SCHOOL_ADMIN' },
+  });
+  secondSchoolAdmin.accountId = secondSchoolAdminAccount.id;
 });
 
 async function createTeacherAccount(schoolAdminToken, emailPrefix) {
@@ -45,6 +56,22 @@ async function createTeacherAccount(schoolAdminToken, emailPrefix) {
     .set('Authorization', `Bearer ${schoolAdminToken}`)
     .send({ email: `${emailPrefix}-${uniqueSuffix()}@example.com`, role: 'TEACHER' });
   return res.body.data.id;
+}
+
+// Sets a real, known password directly via Prisma (never through the
+// password-reset request/confirm endpoints) so ACR-011 tests don't touch
+// that shared, tightly-budgeted rate limiter at all — the same "flip Account
+// state via Prisma directly" technique test-helpers.js's own
+// createTestSchoolAdminDirect already establishes.
+async function createActiveAccountOfRole(schoolAdminToken, emailPrefix, role, password) {
+  const createRes = await request(app)
+    .post('/api/v1/auth/accounts')
+    .set('Authorization', `Bearer ${schoolAdminToken}`)
+    .send({ email: `${emailPrefix}-${uniqueSuffix()}@example.com`, role });
+  const accountId = createRes.body.data.id;
+  const passwordHash = await hashPassword(password);
+  await prisma.account.update({ where: { id: accountId }, data: { passwordHash, status: 'ACTIVE' } });
+  return { accountId, email: createRes.body.data.email };
 }
 
 describe('authentication basics', () => {
@@ -237,6 +264,195 @@ describe('Account activation/deactivation override (ACR-001, Business Rule #25)'
       .set('Authorization', `Bearer ${schoolAdmin.token}`);
     const account = accountsRes.body.data.find((a) => a.id === teacherRes.body.data.accountId);
     expect(account.status).toBe('DEACTIVATED');
+  });
+});
+
+// ACR-011 (docs/01-architecture/Architecture-Decision-Records/ACR-011-...):
+// Administrative Password Reset. Placed here, before "account lockout"
+// below, for the same reason the ACR-001 block above is — that test locks
+// schoolAdmin's own account. Uses createActiveAccountOfRole (direct-Prisma
+// password set) throughout, never the password-reset endpoints, to leave
+// that limiter's budget untouched for other test files/describe blocks.
+describe('Administrative Password Reset (ACR-011, Business Rules #29-30)', () => {
+  it('School Admin resets a Teacher account: invalidates the old password, forces MUST_CHANGE_CREDENTIALS, revokes the active session', async () => {
+    const { accountId, email } = await createActiveAccountOfRole(schoolAdmin.token, 'reset-teacher', 'TEACHER', 'OldPassw0rd1');
+
+    const loginRes = await request(app).post('/api/v1/auth/login').send({ email, password: 'OldPassw0rd1' });
+    expect(loginRes.status).toBe(200);
+    const { refreshToken } = loginRes.body.data;
+
+    const resetRes = await request(app)
+      .patch(`/api/v1/auth/accounts/${accountId}/reset-password`)
+      .set('Authorization', `Bearer ${schoolAdmin.token}`);
+    expect(resetRes.status).toBe(200);
+    expect(resetRes.body.data.account.status).toBe('MUST_CHANGE_CREDENTIALS');
+    expect(resetRes.body.data.account.passwordHash).toBeUndefined();
+
+    // The old password no longer authenticates.
+    const oldLoginRes = await request(app).post('/api/v1/auth/login').send({ email, password: 'OldPassw0rd1' });
+    expect(oldLoginRes.status).toBe(401);
+
+    // The session active at the moment of reset is revoked immediately.
+    const refreshRes = await request(app).post('/api/v1/auth/refresh').send({ refreshToken });
+    expect(refreshRes.status).toBe(401);
+
+    // Never any password value in the audit trail — checked against both the
+    // old password and (if this environment is running in development mode,
+    // per ACR-012) the fresh temporary password.
+    const auditRows = await prisma.auditLog.findMany({
+      where: { action: 'ADMINISTRATIVE_PASSWORD_RESET', metadata: { path: ['targetAccountId'], equals: accountId } },
+    });
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0].userId).toBe(schoolAdmin.accountId);
+    expect(JSON.stringify(auditRows[0].metadata)).not.toMatch(/OldPassw0rd1/);
+    if (resetRes.body.data.temporaryPassword) {
+      expect(JSON.stringify(auditRows[0].metadata)).not.toContain(resetRes.body.data.temporaryPassword);
+    }
+  });
+
+  // ACR-012 (docs/01-architecture/Architecture-Decision-Records/ACR-012-...):
+  // this whole block only exercises real behavior when this environment is
+  // actually running with PASSWORD_RESET_DELIVERY_MODE=development (true for
+  // local/CI per .env.example) — every other mode keeps ACR-011's original
+  // invalidate-only response (temporaryPassword: null), already covered by
+  // the test above regardless of mode.
+  const devMode = (process.env.PASSWORD_RESET_DELIVERY_MODE || 'disabled') === 'development';
+  (devMode ? it : it.skip)(
+    'in development mode, generates a working temporary password that immediately forces a credential change (ACR-012, Business Rule #30)',
+    async () => {
+      const { accountId, email } = await createActiveAccountOfRole(schoolAdmin.token, 'reset-temp-pw', 'TEACHER', 'OldPassw0rd1');
+
+      const resetRes = await request(app)
+        .patch(`/api/v1/auth/accounts/${accountId}/reset-password`)
+        .set('Authorization', `Bearer ${schoolAdmin.token}`);
+      expect(resetRes.status).toBe(200);
+      const { temporaryPassword } = resetRes.body.data;
+      expect(typeof temporaryPassword).toBe('string');
+      expect(temporaryPassword.length).toBeGreaterThanOrEqual(8);
+      expect(temporaryPassword).toMatch(/[A-Za-z]/);
+      expect(temporaryPassword).toMatch(/\d/);
+
+      // The temporary password actually logs the account in...
+      const loginRes = await request(app).post('/api/v1/auth/login').send({ email, password: temporaryPassword });
+      expect(loginRes.status).toBe(200);
+      expect(loginRes.body.data.mustChangeCredentials).toBe(true);
+
+      // ...but every other authenticated action is blocked until they
+      // actually change it, per requireCredentialsEstablished (Business Rule #23).
+      const blockedRes = await request(app)
+        .get('/api/v1/auth/accounts')
+        .set('Authorization', `Bearer ${loginRes.body.data.accessToken}`);
+      expect(blockedRes.status).toBe(403);
+    }
+  );
+
+  (devMode ? it : it.skip)('generates a different temporary password on each reset — never a fixed or predictable value', async () => {
+    const { accountId } = await createActiveAccountOfRole(schoolAdmin.token, 'reset-temp-pw-unique', 'TEACHER', 'OldPassw0rd1');
+
+    const firstRes = await request(app)
+      .patch(`/api/v1/auth/accounts/${accountId}/reset-password`)
+      .set('Authorization', `Bearer ${schoolAdmin.token}`);
+    const secondRes = await request(app)
+      .patch(`/api/v1/auth/accounts/${accountId}/reset-password`)
+      .set('Authorization', `Bearer ${schoolAdmin.token}`);
+
+    expect(firstRes.body.data.temporaryPassword).not.toBe(secondRes.body.data.temporaryPassword);
+  });
+
+  it('School Admin resets a Manager account in their own school', async () => {
+    const { accountId } = await createActiveAccountOfRole(schoolAdmin.token, 'reset-manager', 'MANAGER', 'OldPassw0rd1');
+    const res = await request(app)
+      .patch(`/api/v1/auth/accounts/${accountId}/reset-password`)
+      .set('Authorization', `Bearer ${schoolAdmin.token}`);
+    expect(res.status).toBe(200);
+  });
+
+  it('School Admin resets an Accountant account in their own school', async () => {
+    const { accountId } = await createActiveAccountOfRole(schoolAdmin.token, 'reset-accountant', 'ACCOUNTANT', 'OldPassw0rd1');
+    const res = await request(app)
+      .patch(`/api/v1/auth/accounts/${accountId}/reset-password`)
+      .set('Authorization', `Bearer ${schoolAdmin.token}`);
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects resetting a Student account — Business Rule #29 scopes this to Teacher/Manager/Accountant only', async () => {
+    const { accountId } = await createActiveAccountOfRole(schoolAdmin.token, 'reset-student', 'STUDENT', 'OldPassw0rd1');
+    const res = await request(app)
+      .patch(`/api/v1/auth/accounts/${accountId}/reset-password`)
+      .set('Authorization', `Bearer ${schoolAdmin.token}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects resetting another School Admin account', async () => {
+    const res = await request(app)
+      .patch(`/api/v1/auth/accounts/${secondSchoolAdmin.accountId}/reset-password`)
+      .set('Authorization', `Bearer ${schoolAdmin.token}`);
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects a cross-school reset attempt with 404 — never 403, so the response can't confirm the account exists elsewhere", async () => {
+    const { accountId } = await createActiveAccountOfRole(schoolAdmin.token, 'reset-cross', 'TEACHER', 'OldPassw0rd1');
+    const res = await request(app)
+      .patch(`/api/v1/auth/accounts/${accountId}/reset-password`)
+      .set('Authorization', `Bearer ${secondSchoolAdmin.token}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('Super Admin: new school returns a temporary School Admin password that forces a change on login, and Super Admin can reset it', async () => {
+    const email = `auth-it-temp-${uniqueSuffix()}@example.com`;
+    const createRes = await request(app)
+      .post('/api/v1/schools')
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({ name: `Temp PW School ${uniqueSuffix()}`, firstSchoolAdminEmail: email });
+    expect(createRes.status).toBe(201);
+    const { temporaryPassword } = createRes.body.data.initialSchoolAdmin;
+    expect(temporaryPassword).toEqual(expect.any(String));
+
+    const loginRes = await request(app).post('/api/v1/auth/login').send({ email, password: temporaryPassword });
+    expect(loginRes.status).toBe(200);
+    expect(loginRes.body.data.mustChangeCredentials).toBe(true);
+
+    const changeRes = await request(app)
+      .patch('/api/v1/auth/password')
+      .set('Authorization', `Bearer ${loginRes.body.data.accessToken}`)
+      .send({ currentPassword: temporaryPassword, newPassword: 'MyOwnPassw0rd1' });
+    expect(changeRes.status).toBe(200);
+
+    const account = await prisma.account.findUnique({ where: { email } });
+    const resetRes = await request(app)
+      .patch(`/api/v1/auth/accounts/${account.id}/reset-password`)
+      .set('Authorization', `Bearer ${superAdminToken}`);
+    expect(resetRes.status).toBe(200);
+    expect(resetRes.body.data.account.status).toBe('MUST_CHANGE_CREDENTIALS');
+    const newTemporaryPassword = resetRes.body.data.temporaryPassword;
+    expect(newTemporaryPassword).toEqual(expect.any(String));
+
+    const oldLoginRes = await request(app).post('/api/v1/auth/login').send({ email, password: 'MyOwnPassw0rd1' });
+    expect(oldLoginRes.status).toBe(401);
+    const newLoginRes = await request(app).post('/api/v1/auth/login').send({ email, password: newTemporaryPassword });
+    expect(newLoginRes.status).toBe(200);
+    expect(newLoginRes.body.data.mustChangeCredentials).toBe(true);
+  });
+
+  it('rejects Super Admin resetting school staff — that authority stays with School Admin', async () => {
+    const { accountId } = await createActiveAccountOfRole(schoolAdmin.token, 'reset-superadmin-attempt', 'TEACHER', 'OldPassw0rd1');
+    const res = await request(app)
+      .patch(`/api/v1/auth/accounts/${accountId}/reset-password`)
+      .set('Authorization', `Bearer ${superAdminToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a Teacher attempting to reset another Teacher\'s password — this authority belongs to School Admin alone', async () => {
+    const target = await createActiveAccountOfRole(schoolAdmin.token, 'reset-lateral-target', 'TEACHER', 'OldPassw0rd1');
+    const actor = await createActiveAccountOfRole(schoolAdmin.token, 'reset-lateral-actor', 'TEACHER', 'ActorPassw0rd1');
+    const actorLogin = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ email: actor.email, password: 'ActorPassw0rd1' });
+
+    const res = await request(app)
+      .patch(`/api/v1/auth/accounts/${target.accountId}/reset-password`)
+      .set('Authorization', `Bearer ${actorLogin.body.data.accessToken}`);
+    expect(res.status).toBe(403);
   });
 });
 

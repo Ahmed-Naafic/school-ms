@@ -1,5 +1,6 @@
 import React from 'react';
-import { Dialog, Input } from '../../../shared/components';
+import { Dialog, Input, Select } from '../../../shared/components';
+import { employmentTypeOptions } from './employment-types';
 
 // Mirrors PATCH /teachers/{id}'s own field whitelist exactly — this dialog
 // never offers employmentStatus, employeeId, schoolId, or accountId, since
@@ -71,7 +72,12 @@ export function EditTeacherDialog({ open, teacher, onClose, onSave }) {
           value={joiningDate}
           onChange={(e) => setJoiningDate(e.target.value)}
         />
-        <Input label="Employment type" value={employmentType} onChange={(e) => setEmploymentType(e.target.value)} />
+        <Select
+          label="Employment type"
+          value={employmentType}
+          onChange={(e) => setEmploymentType(e.target.value)}
+          options={employmentTypeOptions(teacher?.employmentType)}
+        />
         <Input label="Contact phone" value={contactPhone} onChange={(e) => setContactPhone(e.target.value)} />
         <Input label="Contact address" value={contactAddress} onChange={(e) => setContactAddress(e.target.value)} />
         <Input label="Qualifications" value={qualifications} onChange={(e) => setQualifications(e.target.value)} />

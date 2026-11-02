@@ -65,6 +65,15 @@ router.post('/staff/me/come', requireRole('TEACHER', 'ACCOUNTANT', 'MANAGER'), c
 // date is required, not optional/defaulted, and today/future are rejected.
 
 router.get('/manager/staff', requireRole('MANAGER'), controller.getManagerStaffAttendance);
+
+// (v2.0) Manager-recorded arrival for a specific Teacher/Accountant — the one
+// deliberate, narrow exception to "self-service only" in this feature's
+// "Come" family (Business Rule #42). :accountId is real client input here,
+// unlike /staff/me/come above; the service layer resolves it against
+// listAccountsByRole(schoolId, ['TEACHER', 'ACCOUNTANT']) only, so a Manager
+// or a School Admin account can never be a valid target, structurally.
+router.post('/manager/staff/:accountId/come', requireRole('MANAGER'), controller.recordManagerStaffArrival);
+
 router.patch('/manager/staff/:accountId/excuse', requireRole('MANAGER'), controller.excuseManagerStaff);
 router.patch('/manager/staff/:accountId/excuse-historical', requireRole('MANAGER'), controller.excuseManagerStaffHistorical);
 router.patch('/manager/staff/:accountId/unexcuse', requireRole('MANAGER'), controller.unexcuseManagerStaff);

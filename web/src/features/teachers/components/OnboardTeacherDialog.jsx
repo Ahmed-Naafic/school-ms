@@ -1,5 +1,6 @@
 import React from 'react';
-import { Dialog, Input } from '../../../shared/components';
+import { Dialog, Input, Select } from '../../../shared/components';
+import { employmentTypeOptions } from './employment-types';
 
 export function OnboardTeacherDialog({ open, onClose, onCreate }) {
   const [email, setEmail] = React.useState('');
@@ -72,11 +73,11 @@ export function OnboardTeacherDialog({ open, onClose, onCreate }) {
           onChange={(e) => setJoiningDate(e.target.value)}
           required
         />
-        <Input
+        <Select
           label="Employment type"
           value={employmentType}
           onChange={(e) => setEmploymentType(e.target.value)}
-          hint="e.g. Full-time, Part-time"
+          options={employmentTypeOptions()}
         />
         <Input label="Contact phone" value={contactPhone} onChange={(e) => setContactPhone(e.target.value)} />
         <Input label="Contact address" value={contactAddress} onChange={(e) => setContactAddress(e.target.value)} />

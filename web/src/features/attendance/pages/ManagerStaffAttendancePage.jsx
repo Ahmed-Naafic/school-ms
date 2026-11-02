@@ -27,13 +27,17 @@ function formatDateLabel(dateStr) {
   return new Date(`${dateStr}T00:00:00.000Z`).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-// Business Lifecycle §5, §11 (v1.7): a Manager never records a Teacher's or
-// Accountant's arrival — each staff member self-records their own "Come"
-// (StaffCheckInPage). PRESENT/LATE/ABSENT are always automatic; EXCUSED is
-// the one status a Manager may apply directly, via the popup below — never
-// a fourth "PRESENT/ABSENT/LATE" option in that popup. A Manager can never
-// reach a Manager's or an Admin's own attendance through this page — the
-// backend never returns them here in the first place (Business Rules #16, #33).
+// Business Lifecycle §5, §11 (v1.7; v2.0): each Teacher/Accountant may
+// self-record their own "Come" (StaffCheckInPage), or their Manager may
+// record it for them directly from this roster while their row is still
+// NOT_RECORDED (Business Rule #42) — clicking that row's control never opens
+// the Excuse popup. PRESENT/LATE/ABSENT are always automatic; EXCUSED is the
+// one status a Manager may apply directly to an already-recorded row, via the
+// popup below — never a fourth "PRESENT/ABSENT/LATE" option in that popup,
+// and never available for NOT_RECORDED. A Manager can never reach a
+// Manager's or an Admin's own attendance through this page — the backend
+// never returns them here, and never accepts them as a "Come" target either
+// (Business Rules #16, #33, #42).
 //
 // (v1.9, Business Rule #41) Excuse is today-only through the normal action;
 // a past date routes through the separate, explicitly-labeled historical
@@ -66,6 +70,23 @@ export function ManagerStaffAttendancePage() {
   React.useEffect(() => {
     load();
   }, [load]);
+
+  // (v2.0) NOT_RECORDED's own control never opens the Excuse popup — clicking
+  // it records that staff member's arrival directly, reusing the same
+  // server-timestamp/derive-status mechanism as self check-in (Business Rule
+  // #42). Every other status keeps opening the Excuse popup, unchanged below.
+  const handleComeForRow = async (s) => {
+    setActingOn(s.accountId);
+    try {
+      await attendanceService.recordManagerStaffArrival(s.accountId);
+      showToast({ tone: 'success', title: 'Arrival recorded' });
+      load();
+    } catch (err) {
+      showToast({ tone: 'danger', title: 'Could not record arrival', description: err.message });
+    } finally {
+      setActingOn(null);
+    }
+  };
 
   const handleConfirmExcuse = async () => {
     if (!excuseTarget) return;
@@ -112,8 +133,9 @@ export function ManagerStaffAttendancePage() {
       <div className="mb-6">
         <h1 className="font-display text-2xl font-bold text-navy-900 dark:text-white">Staff Attendance</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400">
-          Live arrivals for Teachers and Accountants — each staff member self-records their own "Come"; status is
-          determined automatically from the arrival time.
+          Live arrivals for Teachers and Accountants — a staff member may self-record their own "Come," or you may
+          record it for them while their row is Not Recorded; status is determined automatically from the arrival
+          time.
         </p>
       </div>
 
@@ -173,6 +195,21 @@ export function ManagerStaffAttendancePage() {
                                 Unexcuse
                               </Button>
                             </>
+                          ) : s.status === 'NOT_RECORDED' ? (
+                            <button
+                              type="button"
+                              onClick={() => handleComeForRow(s)}
+                              disabled={actingOn === s.accountId || !isToday}
+                              aria-label={
+                                isToday
+                                  ? `${s.email}, status: Not recorded. Press to record arrival now.`
+                                  : `${s.email}, status: Not recorded. Recording arrival is only available for today.`
+                              }
+                              className="flex min-h-[36px] items-center gap-2 rounded-pill px-3 py-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              <AttendanceStatusDot status={null} filled={false} />
+                              <span className={['text-xs font-bold', STATUS_TEXT_CLASS.NOT_RECORDED].join(' ')}>Not recorded</span>
+                            </button>
                           ) : (
                             <button
                               type="button"
@@ -189,7 +226,7 @@ export function ManagerStaffAttendancePage() {
                               }
                               className="flex min-h-[36px] items-center gap-2 rounded-pill px-3 py-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                             >
-                              <AttendanceStatusDot status={s.status === 'NOT_RECORDED' ? null : s.status} filled={s.status !== 'NOT_RECORDED'} />
+                              <AttendanceStatusDot status={s.status} filled />
                               <span className={['text-xs font-bold', STATUS_TEXT_CLASS[s.status] || ''].join(' ')}>
                                 {STATUS_LABEL[s.status] || s.status}
                               </span>

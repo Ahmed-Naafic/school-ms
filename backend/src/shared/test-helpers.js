@@ -125,11 +125,47 @@ function uniqueSuffix() {
   return `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 }
 
+// Same end result as createTestSchoolAdmin (a ready-to-use School Admin
+// token for a freshly created school), but never touches
+// /api/v1/auth/password-reset/request or /confirm — both share one
+// production security rate limit (5 requests per 15 minutes, per
+// Security-Standards.md's Rate Limiting and Abuse Prevention section), and
+// createTestSchoolAdmin alone spends 2 of those 5 per call. A test file
+// needing more than two School Admin fixtures in one run exhausts that
+// budget deterministically, not flakily — this bypasses it the same way
+// this project's own service-layer concurrency tests already bypass HTTP
+// entirely for tests that don't need to exercise the reset flow itself.
+// Calls schools.service.createSchool in-process (no rate limiter applies
+// outside Express route middleware), then sets a real password hash and
+// mints a real JWT directly, mirroring this project's own established
+// "flip Account state via Prisma, sign the token with shared/jwt.js
+// directly" live-verification technique.
+async function createTestSchoolAdminDirect({ schoolName, adminEmail, password }) {
+  const schoolsService = require('../features/schools/schools.service');
+  const { hashPassword } = require('./password');
+  const { signAccessToken } = require('./jwt');
+  const prisma = require('../config/database');
+
+  const school = await schoolsService.createSchool(
+    { name: schoolName, firstSchoolAdminEmail: adminEmail },
+    { id: 'test-fixture-bootstrap' }
+  );
+
+  const passwordHash = await hashPassword(password);
+  const account = await prisma.account.update({
+    where: { email: adminEmail },
+    data: { passwordHash, status: 'ACTIVE' },
+  });
+
+  return { token: signAccessToken(account), schoolId: school.id };
+}
+
 module.exports = {
   app,
   request,
   loginSuperAdmin,
   createTestSchoolAdmin,
+  createTestSchoolAdminDirect,
   establishCredentialsAndLogin,
   uniqueSuffix,
 };

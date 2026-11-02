@@ -227,3 +227,213 @@ describe('Sections (Business Rule #4)', () => {
     expect(res.status).toBe(409);
   });
 });
+
+describe('GradeLevel CRUD and lifecycle (ACR-009, Architecture Update — Grade/Form)', () => {
+  it('rejects an unauthenticated request', async () => {
+    const res = await request(app).get('/api/v1/grade-levels');
+    expect(res.status).toBe(401);
+  });
+
+  it('every new school already has its own placeholder "Ungrouped" GradeLevel', async () => {
+    const res = await request(app).get('/api/v1/grade-levels').set('Authorization', `Bearer ${schoolAToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.some((gl) => gl.name === 'Ungrouped')).toBe(true);
+  });
+
+  it('creates a GradeLevel', async () => {
+    const res = await request(app)
+      .post('/api/v1/grade-levels')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Grade 8', educationLevel: 'PRIMARY' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.name).toBe('Grade 8');
+    expect(res.body.data.status).toBe('ACTIVE');
+    expect(res.body.data.educationLevel).toBe('PRIMARY');
+  });
+
+  it('rejects a missing educationLevel', async () => {
+    const res = await request(app)
+      .post('/api/v1/grade-levels')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Missing Level Grade' });
+    expect(res.status).toBe(422);
+  });
+
+  it('rejects a duplicate name within the same school', async () => {
+    const res = await request(app)
+      .post('/api/v1/grade-levels')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Grade 8', educationLevel: 'PRIMARY' });
+    expect(res.status).toBe(409);
+  });
+
+  it('allows the identical name in a different school (tenant-scoped uniqueness)', async () => {
+    const res = await request(app)
+      .post('/api/v1/grade-levels')
+      .set('Authorization', `Bearer ${schoolBToken}`)
+      .send({ name: 'Grade 8', educationLevel: 'PRIMARY' });
+    expect(res.status).toBe(201);
+  });
+
+  it('PATCH accepts a corrected educationLevel', async () => {
+    const list = await request(app).get('/api/v1/grade-levels').set('Authorization', `Bearer ${schoolAToken}`);
+    const gradeLevelId = list.body.data.find((gl) => gl.name === 'Grade 8').id;
+
+    const res = await request(app)
+      .patch(`/api/v1/grade-levels/${gradeLevelId}`)
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Grade 8', educationLevel: 'SECONDARY' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.educationLevel).toBe('SECONDARY');
+  });
+
+  it('PATCH rejects any field other than name/educationLevel (Guard by Construction)', async () => {
+    const list = await request(app).get('/api/v1/grade-levels').set('Authorization', `Bearer ${schoolAToken}`);
+    const gradeLevelId = list.body.data.find((gl) => gl.name === 'Grade 8').id;
+
+    const res = await request(app)
+      .patch(`/api/v1/grade-levels/${gradeLevelId}`)
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Grade 8 Renamed', status: 'ARCHIVED' });
+    expect(res.status).toBe(422);
+  });
+
+  it('School B cannot read or archive School A\'s GradeLevel (tenant isolation)', async () => {
+    const list = await request(app).get('/api/v1/grade-levels').set('Authorization', `Bearer ${schoolAToken}`);
+    const gradeLevelId = list.body.data.find((gl) => gl.name === 'Grade 8').id;
+
+    const getRes = await request(app)
+      .get(`/api/v1/grade-levels/${gradeLevelId}`)
+      .set('Authorization', `Bearer ${schoolBToken}`);
+    expect(getRes.status).toBe(404);
+
+    const archiveRes = await request(app)
+      .patch(`/api/v1/grade-levels/${gradeLevelId}/archive`)
+      .set('Authorization', `Bearer ${schoolBToken}`);
+    expect(archiveRes.status).toBe(404);
+  });
+
+  it('blocks archiving a GradeLevel referenced by an active Class', async () => {
+    const gradeLevelRes = await request(app)
+      .post('/api/v1/grade-levels')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Grade 10', educationLevel: 'PRIMARY' });
+    const gradeLevelId = gradeLevelRes.body.data.id;
+
+    await request(app)
+      .post('/api/v1/classes')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Grade 10A', gradeLevelId });
+
+    const archiveRes = await request(app)
+      .patch(`/api/v1/grade-levels/${gradeLevelId}/archive`)
+      .set('Authorization', `Bearer ${schoolAToken}`);
+    expect(archiveRes.status).toBe(409);
+  });
+
+  it('has no delete route', async () => {
+    const list = await request(app).get('/api/v1/grade-levels').set('Authorization', `Bearer ${schoolAToken}`);
+    const gradeLevelId = list.body.data[0].id;
+
+    const res = await request(app)
+      .delete(`/api/v1/grade-levels/${gradeLevelId}`)
+      .set('Authorization', `Bearer ${schoolAToken}`);
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('Same-Shift-within-GradeLevel enforcement (ACR-009), including reactivation (Technical Design Review finding)', () => {
+  let sharedGradeLevelId;
+  let shiftAId;
+  let shiftBId;
+
+  beforeAll(async () => {
+    const gradeLevelRes = await request(app)
+      .post('/api/v1/grade-levels')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Shared Grade/Form', educationLevel: 'PRIMARY' });
+    sharedGradeLevelId = gradeLevelRes.body.data.id;
+
+    // Times chosen to avoid overlapping the school's own auto-created
+    // default "Morning" Shift (07:30-12:30).
+    const shiftARes = await request(app)
+      .post('/api/v1/shifts')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Shift A', startTime: '13:00', endTime: '15:00' });
+    shiftAId = shiftARes.body.data.id;
+
+    const shiftBRes = await request(app)
+      .post('/api/v1/shifts')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Shift B', startTime: '15:30', endTime: '17:30' });
+    shiftBId = shiftBRes.body.data.id;
+  });
+
+  it('allows two Classes in the same GradeLevel on the same Shift', async () => {
+    const first = await request(app)
+      .post('/api/v1/classes')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Shared A', gradeLevelId: sharedGradeLevelId, shiftId: shiftAId });
+    expect(first.status).toBe(201);
+
+    const second = await request(app)
+      .post('/api/v1/classes')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Shared B', gradeLevelId: sharedGradeLevelId, shiftId: shiftAId });
+    expect(second.status).toBe(201);
+  });
+
+  it('rejects creating a Class in that GradeLevel on a different Shift', async () => {
+    const res = await request(app)
+      .post('/api/v1/classes')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Shared C', gradeLevelId: sharedGradeLevelId, shiftId: shiftBId });
+    expect(res.status).toBe(409);
+  });
+
+  it('rejects updating an existing Class\'s shiftId alone if it would conflict with its GradeLevel siblings', async () => {
+    const list = await request(app).get('/api/v1/classes').set('Authorization', `Bearer ${schoolAToken}`);
+    const sharedA = list.body.data.find((c) => c.name === 'Shared A');
+
+    // shiftId is sent, gradeLevelId is left unchanged (name is required on
+    // every PATCH regardless, an existing, unrelated Guard). Technical
+    // Design Review's own finding: this must be re-checked exactly as if
+    // gradeLevelId itself had changed.
+    const res = await request(app)
+      .patch(`/api/v1/classes/${sharedA.id}`)
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: sharedA.name, shiftId: shiftBId });
+    expect(res.status).toBe(409);
+  });
+
+  it('rejects reactivating a Class whose GradeLevel gained a same-Shift-violating sibling while it sat archived (Technical Design Review finding)', async () => {
+    // Archive both existing members of sharedGradeLevelId ("Shared A" and
+    // "Shared B", both Shift A), leaving it with zero Active Classes — the
+    // only state that lets a brand-new Class join it on a *different*
+    // Shift with nothing (yet) to conflict with.
+    const list = await request(app).get('/api/v1/classes').set('Authorization', `Bearer ${schoolAToken}`);
+    const sharedA = list.body.data.find((c) => c.name === 'Shared A');
+    const sharedB = list.body.data.find((c) => c.name === 'Shared B');
+    await request(app).patch(`/api/v1/classes/${sharedA.id}/archive`).set('Authorization', `Bearer ${schoolAToken}`);
+    await request(app).patch(`/api/v1/classes/${sharedB.id}/archive`).set('Authorization', `Bearer ${schoolAToken}`);
+
+    // A brand-new Class now joins sharedGradeLevelId on Shift B — allowed,
+    // since sharedGradeLevelId currently has zero Active members.
+    const newClassRes = await request(app)
+      .post('/api/v1/classes')
+      .set('Authorization', `Bearer ${schoolAToken}`)
+      .send({ name: 'Shared E', gradeLevelId: sharedGradeLevelId, shiftId: shiftBId });
+    expect(newClassRes.status).toBe(201);
+
+    // Reactivating "Shared A" (Shift A) must now be rejected — restoring it
+    // would create two Active Classes in sharedGradeLevelId on different
+    // Shifts (A and B), exactly the invariant this Architecture Update
+    // exists to prevent. Before this fix, reactivateClass never re-checked
+    // this at all.
+    const reactivateRes = await request(app)
+      .patch(`/api/v1/classes/${sharedA.id}/reactivate`)
+      .set('Authorization', `Bearer ${schoolAToken}`);
+    expect(reactivateRes.status).toBe(409);
+  });
+});

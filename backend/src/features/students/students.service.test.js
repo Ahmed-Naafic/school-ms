@@ -2,11 +2,13 @@ jest.mock('./students.repository');
 jest.mock('../../shared/audit');
 jest.mock('../auth/auth.service');
 jest.mock('../classes/classes.service');
+jest.mock('../academic-years/academic-years.service');
 
 const repository = require('./students.repository');
 const { recordAuditEvent } = require('../../shared/audit');
 const authService = require('../auth/auth.service');
 const classesService = require('../classes/classes.service');
+const academicYearsService = require('../academic-years/academic-years.service');
 const service = require('./students.service');
 
 const actingUser = { id: 'admin-1', schoolId: 'school-1' };
@@ -17,6 +19,11 @@ beforeEach(() => {
   // assertSectionEnrollable is a no-op unless a test explicitly overrides
   // this to exercise Section-specific behavior.
   classesService.listActiveSectionsForClass.mockResolvedValue([]);
+  // (ACR-004) Default: 'ay1' is a valid, non-Archived Academic Year for
+  // 'school-1', so assertAcademicYearEnrollable is a no-op unless a test
+  // explicitly overrides this to exercise Academic-Year-specific behavior.
+  academicYearsService.getAcademicYearById.mockResolvedValue({ id: 'ay1', schoolId: 'school-1', status: 'ACTIVE' });
+  academicYearsService.getCurrentAcademicYear.mockResolvedValue({ id: 'ay1', schoolId: 'school-1', status: 'ACTIVE' });
 });
 
 describe('admitStudent (Business Rules #1, #3)', () => {
@@ -43,7 +50,7 @@ describe('enrollStudent / assertClassEnrollable (Business Rule #9)', () => {
     classesService.getClassById.mockResolvedValue({ id: 'c1', schoolId: 'school-1', status: 'ARCHIVED' });
 
     await expect(
-      service.enrollStudent('s1', { classId: 'c1', academicYear: '2025/2026' }, actingUser)
+      service.enrollStudent('s1', { classId: 'c1', academicYearId: 'ay1' }, actingUser)
     ).rejects.toThrow('This Class is archived and cannot accept new Enrollment');
     expect(repository.createEnrollment).not.toHaveBeenCalled();
   });
@@ -53,7 +60,7 @@ describe('enrollStudent / assertClassEnrollable (Business Rule #9)', () => {
     classesService.getClassById.mockResolvedValue({ id: 'c1', schoolId: 'other-school', status: 'ACTIVE' });
 
     await expect(
-      service.enrollStudent('s1', { classId: 'c1', academicYear: '2025/2026' }, actingUser)
+      service.enrollStudent('s1', { classId: 'c1', academicYearId: 'ay1' }, actingUser)
     ).rejects.toThrow('Class not found');
   });
 
@@ -63,7 +70,7 @@ describe('enrollStudent / assertClassEnrollable (Business Rule #9)', () => {
       repository.findById.mockResolvedValue({ id: 's1', schoolId: 'school-1', status });
 
       await expect(
-        service.enrollStudent('s1', { classId: 'c1', academicYear: '2025/2026' }, actingUser)
+        service.enrollStudent('s1', { classId: 'c1', academicYearId: 'ay1' }, actingUser)
       ).rejects.toThrow('Only an active Student may be enrolled');
       expect(repository.createEnrollment).not.toHaveBeenCalled();
     }
@@ -80,7 +87,7 @@ describe('enrollStudent Section reference (ACR-002, Business Rule #18)', () => {
     classesService.listActiveSectionsForClass.mockResolvedValue([{ id: 'sec-a', name: 'A' }]);
 
     await expect(
-      service.enrollStudent('s1', { classId: 'c1', academicYear: '2025/2026' }, actingUser)
+      service.enrollStudent('s1', { classId: 'c1', academicYearId: 'ay1' }, actingUser)
     ).rejects.toThrow('A Section is required');
     expect(repository.createEnrollment).not.toHaveBeenCalled();
   });
@@ -89,7 +96,7 @@ describe('enrollStudent Section reference (ACR-002, Business Rule #18)', () => {
     classesService.listActiveSectionsForClass.mockResolvedValue([{ id: 'sec-a', name: 'A' }]);
 
     await expect(
-      service.enrollStudent('s1', { classId: 'c1', sectionId: 'sec-from-elsewhere', academicYear: '2025/2026' }, actingUser)
+      service.enrollStudent('s1', { classId: 'c1', sectionId: 'sec-from-elsewhere', academicYearId: 'ay1' }, actingUser)
     ).rejects.toThrow('Invalid Section');
     expect(repository.createEnrollment).not.toHaveBeenCalled();
   });
@@ -98,7 +105,7 @@ describe('enrollStudent Section reference (ACR-002, Business Rule #18)', () => {
     classesService.listActiveSectionsForClass.mockResolvedValue([{ id: 'sec-a', name: 'A' }]);
     repository.createEnrollment.mockResolvedValue({ id: 'enr-1', classId: 'c1', sectionId: 'sec-a' });
 
-    await service.enrollStudent('s1', { classId: 'c1', sectionId: 'sec-a', academicYear: '2025/2026' }, actingUser);
+    await service.enrollStudent('s1', { classId: 'c1', sectionId: 'sec-a', academicYearId: 'ay1' }, actingUser);
 
     expect(repository.createEnrollment).toHaveBeenCalledWith(
       expect.objectContaining({ classId: 'c1', sectionId: 'sec-a' })
@@ -109,10 +116,54 @@ describe('enrollStudent Section reference (ACR-002, Business Rule #18)', () => {
     classesService.listActiveSectionsForClass.mockResolvedValue([]);
     repository.createEnrollment.mockResolvedValue({ id: 'enr-1', classId: 'c1', sectionId: null });
 
-    await service.enrollStudent('s1', { classId: 'c1', academicYear: '2025/2026' }, actingUser);
+    await service.enrollStudent('s1', { classId: 'c1', academicYearId: 'ay1' }, actingUser);
 
     expect(repository.createEnrollment).toHaveBeenCalledWith(
       expect.objectContaining({ classId: 'c1', sectionId: null })
+    );
+  });
+});
+
+describe('enrollStudent Academic Year reference (ACR-004, Business Rules #21, #22)', () => {
+  beforeEach(() => {
+    repository.findById.mockResolvedValue({ id: 's1', schoolId: 'school-1', status: 'ACTIVE' });
+    classesService.getClassById.mockResolvedValue({ id: 'c1', schoolId: 'school-1', status: 'ACTIVE' });
+  });
+
+  it('rejects Enrollment with no academicYearId (Business Rule #22 — no valid value to supply when the school has none)', async () => {
+    await expect(
+      service.enrollStudent('s1', { classId: 'c1' }, actingUser)
+    ).rejects.toThrow('An Academic Year is required');
+    expect(academicYearsService.getAcademicYearById).not.toHaveBeenCalled();
+    expect(repository.createEnrollment).not.toHaveBeenCalled();
+  });
+
+  it('rejects a nonexistent or cross-school academicYearId', async () => {
+    academicYearsService.getAcademicYearById.mockResolvedValue(null);
+
+    await expect(
+      service.enrollStudent('s1', { classId: 'c1', academicYearId: 'other-school-ay' }, actingUser)
+    ).rejects.toThrow('Invalid Academic Year');
+    expect(repository.createEnrollment).not.toHaveBeenCalled();
+  });
+
+  it('rejects an Archived academicYearId', async () => {
+    academicYearsService.getAcademicYearById.mockResolvedValue({ id: 'ay1', schoolId: 'school-1', status: 'ARCHIVED' });
+
+    await expect(
+      service.enrollStudent('s1', { classId: 'c1', academicYearId: 'ay1' }, actingUser)
+    ).rejects.toThrow('Invalid Academic Year');
+    expect(repository.createEnrollment).not.toHaveBeenCalled();
+  });
+
+  it('accepts a valid, non-Archived academicYearId belonging to the school', async () => {
+    repository.createEnrollment.mockResolvedValue({ id: 'enr-1', classId: 'c1', academicYearId: 'ay1' });
+
+    await service.enrollStudent('s1', { classId: 'c1', academicYearId: 'ay1' }, actingUser);
+
+    expect(academicYearsService.getAcademicYearById).toHaveBeenCalledWith('school-1', 'ay1');
+    expect(repository.createEnrollment).toHaveBeenCalledWith(
+      expect.objectContaining({ classId: 'c1', academicYearId: 'ay1' })
     );
   });
 });
@@ -128,7 +179,7 @@ describe('promoteStudent (Business Rules #6, #10)', () => {
     classesService.getFinalClass.mockResolvedValue({ id: 'grade-5' });
     repository.createEnrollment.mockResolvedValue({ id: 'enr-2', classId: 'grade-2' });
 
-    await service.promoteStudent('s1', { academicYear: '2026/2027' }, actingUser);
+    await service.promoteStudent('s1', { academicYearId: 'ay1' }, actingUser);
 
     expect(repository.createEnrollment).toHaveBeenCalledWith(
       expect.objectContaining({ classId: 'grade-2' })
@@ -143,7 +194,7 @@ describe('promoteStudent (Business Rules #6, #10)', () => {
     classesService.getFinalClass.mockResolvedValue({ id: 'grade-5' });
     repository.createEnrollment.mockResolvedValue({ id: 'enr-2', classId: 'grade-3' });
 
-    await service.promoteStudent('s1', { classId: 'grade-3', academicYear: '2026/2027' }, actingUser);
+    await service.promoteStudent('s1', { classId: 'grade-3', academicYearId: 'ay1' }, actingUser);
 
     expect(classesService.getSuggestedNextClass).not.toHaveBeenCalled();
     expect(repository.createEnrollment).toHaveBeenCalledWith(expect.objectContaining({ classId: 'grade-3' }));
@@ -156,7 +207,7 @@ describe('promoteStudent (Business Rules #6, #10)', () => {
     classesService.getFinalClass.mockResolvedValue({ id: 'grade-5' });
     repository.createEnrollment.mockResolvedValue({ id: 'enr-5', classId: 'grade-5' });
 
-    await service.promoteStudent('s1', { classId: 'grade-5', academicYear: '2027/2028' }, actingUser);
+    await service.promoteStudent('s1', { classId: 'grade-5', academicYearId: 'ay1' }, actingUser);
 
     expect(repository.updateStatus).toHaveBeenCalledWith('s1', 'ELIGIBLE_FOR_GRADUATION');
     expect(recordAuditEvent).toHaveBeenCalledWith(
@@ -168,7 +219,7 @@ describe('promoteStudent (Business Rules #6, #10)', () => {
     repository.findById.mockResolvedValue({ ...baseStudent, status: 'WITHDRAWN' });
 
     await expect(
-      service.promoteStudent('s1', { academicYear: '2026/2027' }, actingUser)
+      service.promoteStudent('s1', { academicYearId: 'ay1' }, actingUser)
     ).rejects.toThrow('Only an active Student may be promoted');
   });
 
@@ -177,7 +228,7 @@ describe('promoteStudent (Business Rules #6, #10)', () => {
     repository.findLatestEnrollment.mockResolvedValue(null);
 
     await expect(
-      service.promoteStudent('s1', { academicYear: '2026/2027' }, actingUser)
+      service.promoteStudent('s1', { academicYearId: 'ay1' }, actingUser)
     ).rejects.toThrow('Student must be enrolled before they can be promoted');
   });
 });
@@ -197,7 +248,7 @@ describe('promoteStudent Section matching (ACR-002, Business Rule #19)', () => {
     });
     repository.createEnrollment.mockResolvedValue({ id: 'enr-2', classId: 'grade-2', sectionId: 'g2-sec-a' });
 
-    await service.promoteStudent('s1', { classId: 'grade-2', academicYear: '2026/2027' }, actingUser);
+    await service.promoteStudent('s1', { classId: 'grade-2', academicYearId: 'ay1' }, actingUser);
 
     expect(repository.createEnrollment).toHaveBeenCalledWith(
       expect.objectContaining({ classId: 'grade-2', sectionId: 'g2-sec-a' })
@@ -215,7 +266,7 @@ describe('promoteStudent Section matching (ACR-002, Business Rule #19)', () => {
     });
 
     await expect(
-      service.promoteStudent('s1', { classId: 'grade-2', academicYear: '2026/2027' }, actingUser)
+      service.promoteStudent('s1', { classId: 'grade-2', academicYearId: 'ay1' }, actingUser)
     ).rejects.toThrow('A Section is required');
     expect(repository.createEnrollment).not.toHaveBeenCalled();
   });
@@ -233,7 +284,7 @@ describe('promoteStudent Section matching (ACR-002, Business Rule #19)', () => {
 
     await service.promoteStudent(
       's1',
-      { classId: 'grade-2', sectionId: 'g2-sec-b', academicYear: '2026/2027' },
+      { classId: 'grade-2', sectionId: 'g2-sec-b', academicYearId: 'ay1' },
       actingUser
     );
 
@@ -250,11 +301,62 @@ describe('promoteStudent Section matching (ACR-002, Business Rule #19)', () => {
     classesService.listActiveSectionsForClass.mockResolvedValue([]);
     repository.createEnrollment.mockResolvedValue({ id: 'enr-2', classId: 'grade-2', sectionId: null });
 
-    await service.promoteStudent('s1', { classId: 'grade-2', academicYear: '2026/2027' }, actingUser);
+    await service.promoteStudent('s1', { classId: 'grade-2', academicYearId: 'ay1' }, actingUser);
 
     expect(repository.createEnrollment).toHaveBeenCalledWith(
       expect.objectContaining({ classId: 'grade-2', sectionId: null })
     );
+  });
+});
+
+describe('promoteStudent Academic Year default (ACR-004, Business Rules #21, #23)', () => {
+  const baseStudent = { id: 's1', schoolId: 'school-1', status: 'ACTIVE' };
+
+  beforeEach(() => {
+    repository.findById.mockResolvedValue(baseStudent);
+    repository.findLatestEnrollment.mockResolvedValue({ classId: 'grade-1' });
+    classesService.getClassById.mockResolvedValue({ id: 'grade-2', schoolId: 'school-1', status: 'ACTIVE' });
+    classesService.getFinalClass.mockResolvedValue(null);
+    repository.createEnrollment.mockResolvedValue({ id: 'enr-2', classId: 'grade-2', academicYearId: 'ay1' });
+  });
+
+  it('defaults to the school\'s Current Academic Year when academicYearId is omitted', async () => {
+    await service.promoteStudent('s1', { classId: 'grade-2' }, actingUser);
+
+    expect(academicYearsService.getCurrentAcademicYear).toHaveBeenCalledWith('school-1');
+    expect(repository.createEnrollment).toHaveBeenCalledWith(
+      expect.objectContaining({ classId: 'grade-2', academicYearId: 'ay1' })
+    );
+  });
+
+  it('an explicitly-chosen academicYearId always wins over the Current-Academic-Year default', async () => {
+    academicYearsService.getAcademicYearById.mockResolvedValue({ id: 'ay2', schoolId: 'school-1', status: 'ACTIVE' });
+
+    await service.promoteStudent('s1', { classId: 'grade-2', academicYearId: 'ay2' }, actingUser);
+
+    expect(academicYearsService.getCurrentAcademicYear).not.toHaveBeenCalled();
+    expect(repository.createEnrollment).toHaveBeenCalledWith(
+      expect.objectContaining({ classId: 'grade-2', academicYearId: 'ay2' })
+    );
+  });
+
+  it('rejects Promotion when the school has no Current Academic Year and none was explicitly chosen (Business Rule #22)', async () => {
+    academicYearsService.getCurrentAcademicYear.mockResolvedValue(null);
+
+    await expect(
+      service.promoteStudent('s1', { classId: 'grade-2' }, actingUser)
+    ).rejects.toThrow('An Academic Year is required');
+    expect(repository.createEnrollment).not.toHaveBeenCalled();
+  });
+
+  it('the defaulted Current Academic Year still passes through the same Archived/cross-school validation as an explicit choice', async () => {
+    academicYearsService.getCurrentAcademicYear.mockResolvedValue({ id: 'ay1', schoolId: 'school-1', status: 'ARCHIVED' });
+    academicYearsService.getAcademicYearById.mockResolvedValue({ id: 'ay1', schoolId: 'school-1', status: 'ARCHIVED' });
+
+    await expect(
+      service.promoteStudent('s1', { classId: 'grade-2' }, actingUser)
+    ).rejects.toThrow('Invalid Academic Year');
+    expect(repository.createEnrollment).not.toHaveBeenCalled();
   });
 });
 

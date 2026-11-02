@@ -7,11 +7,13 @@ import { CreateSectionDialog } from '../components/CreateSectionDialog';
 import { EditClassDialog } from '../components/EditClassDialog';
 import { EditSectionDialog } from '../components/EditSectionDialog';
 import * as classesService from '../services/classes.service';
+import * as gradeLevelsService from '../services/grade-levels.service';
 import { formatClassSectionName } from '../utils/format-class-section-name';
 
 export function ClassesListPage() {
   const { showToast } = useToast();
   const [classes, setClasses] = React.useState([]);
+  const [gradeLevels, setGradeLevels] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [createClassOpen, setCreateClassOpen] = React.useState(false);
   const [sectionDialogClassId, setSectionDialogClassId] = React.useState(null);
@@ -23,10 +25,21 @@ export function ClassesListPage() {
     [classes]
   );
 
+  // (ACR-009, Architecture Update — Grade/Form)
+  const gradeLevelOptions = React.useMemo(
+    () => gradeLevels.filter((gl) => gl.status === 'ACTIVE').map((gl) => ({ value: gl.id, label: gl.name })),
+    [gradeLevels]
+  );
+
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      setClasses(await classesService.listClasses());
+      const [classList, gradeLevelList] = await Promise.all([
+        classesService.listClasses(),
+        gradeLevelsService.listGradeLevels(),
+      ]);
+      setClasses(classList);
+      setGradeLevels(gradeLevelList);
     } finally {
       setLoading(false);
     }
@@ -72,6 +85,12 @@ export function ClassesListPage() {
 
   const activeClasses = classes.filter((c) => c.status === 'ACTIVE');
 
+  // Only one Sections popup open at a time. Tracked by class id (not the
+  // trigger element) so it survives the table re-rendering after a Section
+  // action reloads the list.
+  const [sectionsPopupClassId, setSectionsPopupClassId] = React.useState(null);
+  const closeSectionsPopup = React.useCallback(() => setSectionsPopupClassId(null), []);
+
   return (
     <div className="mx-auto max-w-container px-4 py-8 sm:px-6">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
@@ -81,12 +100,7 @@ export function ClassesListPage() {
             Manage your school's Class structure, Sections, and academic sequence.
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setSectionDialogClassId('')}>
-            Add Section
-          </Button>
-          <Button onClick={() => setCreateClassOpen(true)}>Create Class</Button>
-        </div>
+        <Button onClick={() => setCreateClassOpen(true)}>Create Class</Button>
       </div>
 
       <Card padding="p-0">
@@ -110,6 +124,9 @@ export function ClassesListPage() {
               {classes.map((cls) => {
                 const index = activeClasses.findIndex((c) => c.id === cls.id);
                 const isArchived = cls.status === 'ARCHIVED';
+                const isExpanded = sectionsPopupClassId === cls.id;
+                const activeSectionCount = cls.sections.filter((sec) => sec.status !== 'ARCHIVED').length;
+                const archivedSectionCount = cls.sections.length - activeSectionCount;
 
                 return (
                   <tr key={cls.id} className="border-b border-gray-100 last:border-0 dark:border-navy-800">
@@ -124,60 +141,26 @@ export function ClassesListPage() {
                       <ClassStatusBadge status={cls.status} />
                     </td>
                     <td className="px-5 py-3">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        {cls.sections.map((section) => (
-                          <div key={section.id} className="flex items-center gap-1">
-                            <Tooltip label="Edit Section">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setEditingSection({
-                                    classId: cls.id,
-                                    sectionId: section.id,
-                                    name: section.name,
-                                    combinedName: formatClassSectionName(cls.name, section.name),
-                                  })
-                                }
-                              >
-                                <Tag className={['cursor-pointer', section.status === 'ARCHIVED' ? 'opacity-50' : ''].join(' ')}>
-                                  {formatClassSectionName(cls.name, section.name)}
-                                </Tag>
-                              </button>
-                            </Tooltip>
-                            {!isArchived &&
-                              (section.status === 'ARCHIVED' ? (
-                                <Tooltip label="Reactivate Section">
-                                  <IconButton
-                                    label="Reactivate Section"
-                                    size="sm"
-                                    onClick={() =>
-                                      runAction(
-                                        () => classesService.reactivateSection(cls.id, section.id),
-                                        'Section reactivated'
-                                      )
-                                    }
-                                  >
-                                    <RestoreIcon />
-                                  </IconButton>
-                                </Tooltip>
-                              ) : (
-                                <Tooltip label="Archive Section">
-                                  <IconButton
-                                    label="Archive Section"
-                                    size="sm"
-                                    onClick={() =>
-                                      runAction(
-                                        () => classesService.archiveSection(cls.id, section.id),
-                                        'Section archived'
-                                      )
-                                    }
-                                  >
-                                    <ArchiveIcon />
-                                  </IconButton>
-                                </Tooltip>
-                              ))}
-                          </div>
-                        ))}
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          aria-expanded={isExpanded}
+                          aria-haspopup="dialog"
+                          data-sections-trigger={cls.id}
+                          onClick={() => setSectionsPopupClassId(isExpanded ? null : cls.id)}
+                          className={[
+                            'inline-flex items-center gap-1.5 rounded-pill border px-3 py-1 text-xs font-bold transition-colors duration-fast',
+                            isExpanded
+                              ? 'border-teal-500 bg-teal-50 text-teal-700 dark:bg-navy-800 dark:text-teal-300'
+                              : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300 dark:border-navy-700 dark:bg-navy-900 dark:text-gray-300',
+                          ].join(' ')}
+                        >
+                          {activeSectionCount} {activeSectionCount === 1 ? 'section' : 'sections'}
+                          {archivedSectionCount > 0 && (
+                            <span className="font-normal text-gray-500 dark:text-gray-400">+{archivedSectionCount} archived</span>
+                          )}
+                          <ChevronIcon open={isExpanded} />
+                        </button>
                         {!isArchived && (
                           <Tooltip label="Add Section">
                             <IconButton
@@ -190,6 +173,73 @@ export function ClassesListPage() {
                           </Tooltip>
                         )}
                       </div>
+                      {isExpanded && (
+                        <SectionsPopup
+                          classId={cls.id}
+                          title={`${cls.name} — Sections`}
+                          onClose={closeSectionsPopup}
+                        >
+                    {cls.sections.length === 0 && (
+                      <span className="px-1 text-xs text-gray-500 dark:text-gray-400">No Sections yet.</span>
+                    )}
+                    {cls.sections.map((section) => (
+                      <div
+                        key={section.id}
+                        className="flex items-center gap-1 rounded-md border border-gray-200 bg-white py-0.5 pl-1 pr-0.5 dark:border-navy-700 dark:bg-navy-900"
+                      >
+                        <Tooltip label="Edit Section">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setEditingSection({
+                                classId: cls.id,
+                                sectionId: section.id,
+                                name: section.name,
+                                combinedName: formatClassSectionName(cls.name, section.name),
+                              })
+                            }
+                          >
+                            <Tag className={['cursor-pointer', section.status === 'ARCHIVED' ? 'opacity-50' : ''].join(' ')}>
+                              {formatClassSectionName(cls.name, section.name)}
+                            </Tag>
+                          </button>
+                        </Tooltip>
+                        {!isArchived &&
+                          (section.status === 'ARCHIVED' ? (
+                            <Tooltip label="Reactivate Section">
+                              <IconButton
+                                label="Reactivate Section"
+                                size="sm"
+                                onClick={() =>
+                                  runAction(
+                                    () => classesService.reactivateSection(cls.id, section.id),
+                                    'Section reactivated'
+                                  )
+                                }
+                              >
+                                <RestoreIcon />
+                              </IconButton>
+                            </Tooltip>
+                          ) : (
+                            <Tooltip label="Archive Section">
+                              <IconButton
+                                label="Archive Section"
+                                size="sm"
+                                onClick={() =>
+                                  runAction(
+                                    () => classesService.archiveSection(cls.id, section.id),
+                                    'Section archived'
+                                  )
+                                }
+                              >
+                                <ArchiveIcon />
+                              </IconButton>
+                            </Tooltip>
+                          ))}
+                      </div>
+                    ))}
+                        </SectionsPopup>
+                      )}
                     </td>
                     <td className="px-5 py-3">
                       <div className="flex gap-1">
@@ -280,7 +330,11 @@ export function ClassesListPage() {
         )}
       </Card>
 
-      <CreateClassDialog open={createClassOpen} onClose={() => setCreateClassOpen(false)} onCreate={handleCreateClass} />
+      <CreateClassDialog
+        open={createClassOpen}
+        onClose={() => setCreateClassOpen(false)}
+        onCreate={handleCreateClass}
+      />
       <CreateSectionDialog
         open={sectionDialogClassId !== null}
         classOptions={classOptions}
@@ -291,6 +345,8 @@ export function ClassesListPage() {
       <EditClassDialog
         open={editingClass !== null}
         initialName={editingClass?.name}
+        initialGradeLevelId={editingClass?.gradeLevelId}
+        gradeLevelOptions={gradeLevelOptions}
         onClose={() => setEditingClass(null)}
         onSave={handleSaveClassName}
       />
@@ -351,6 +407,83 @@ function RestoreIcon() {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
       <path d="M3 3v5h5" />
+    </svg>
+  );
+}
+
+// Fixed-positioned so the table's overflow-x-auto wrapper can't clip it.
+// Closes on outside click, Escape, scroll or resize (the anchor would move).
+function SectionsPopup({ classId, title, onClose, children }) {
+  const ref = React.useRef(null);
+  const [pos, setPos] = React.useState(null);
+  const getAnchor = React.useCallback(
+    () => document.querySelector(`[data-sections-trigger="${classId}"]`),
+    [classId]
+  );
+
+  React.useLayoutEffect(() => {
+    const anchor = getAnchor();
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    const width = Math.min(360, window.innerWidth - 32);
+    const left = Math.max(16, Math.min(rect.left, window.innerWidth - width - 16));
+    const height = ref.current ? ref.current.offsetHeight : 0;
+    const below = rect.bottom + 6;
+    const top = below + height > window.innerHeight - 16 ? Math.max(16, rect.top - height - 6) : below;
+    setPos({ top, left, width });
+  }, [getAnchor, children]);
+
+  React.useEffect(() => {
+    const onPointerDown = (e) => {
+      const anchor = getAnchor();
+      if (ref.current && !ref.current.contains(e.target) && !(anchor && anchor.contains(e.target))) onClose();
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        onClose();
+        getAnchor()?.focus();
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onClose, true);
+    window.addEventListener('resize', onClose);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onClose, true);
+      window.removeEventListener('resize', onClose);
+    };
+  }, [getAnchor, onClose]);
+
+  return (
+    <div
+      ref={ref}
+      role="dialog"
+      aria-label={title}
+      style={pos ? { top: pos.top, left: pos.left, width: pos.width } : { visibility: 'hidden' }}
+      className="fixed z-40 rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-navy-700 dark:bg-navy-900"
+    >
+      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">{title}</div>
+      <div className="flex max-h-64 flex-wrap items-center gap-1.5 overflow-y-auto">{children}</div>
+    </div>
+  );
+}
+
+function ChevronIcon({ open }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={['transition-transform duration-fast', open ? 'rotate-180' : ''].join(' ')}
+    >
+      <path d="m6 9 6 6 6-6" />
     </svg>
   );
 }

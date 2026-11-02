@@ -57,6 +57,12 @@ export const recordSelfArrival = () => api.post('/attendance/staff/me/come');
 
 export const getManagerStaffAttendance = (date) => api.get(`/attendance/manager/staff?date=${date}`);
 
+// (v2.0) Manager-recorded arrival for a specific Teacher/Accountant — no
+// body; the server derives PRESENT/LATE from its own captured timestamp,
+// identically to self check-in, and rejects (422) any account that isn't a
+// Teacher/Accountant at the Manager's own school.
+export const recordManagerStaffArrival = (accountId) => api.post(`/attendance/manager/staff/${accountId}/come`);
+
 export const excuseManagerStaff = (accountId, date) =>
   api.patch(`/attendance/manager/staff/${accountId}/excuse`, { date });
 

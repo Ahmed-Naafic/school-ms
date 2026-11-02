@@ -19,3 +19,33 @@ body {
   @apply bg-gray-50 text-gray-900 font-body dark:bg-navy-950 dark:text-gray-100;
   overflow-x: hidden;
 }
+
+/* Timetable printing (Master/Class/Teacher Timetable pages) — the first,
+   and so far only, print feature in this project. A page marks its own
+   printable region with .print-area; everything else is hidden for print,
+   and .no-print elements (toolbars, buttons) are hidden even inside a
+   printable region. Landscape is set globally via @page since only this
+   feature prints today — revisit with a more targeted rule if a future
+   feature needs portrait printing from the same app. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
+
+@page {
+  size: landscape;
+}

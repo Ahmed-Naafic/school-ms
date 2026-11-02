@@ -44,13 +44,13 @@ export function ChangePasswordPage() {
         <h1 className="mb-1 font-display text-2xl font-bold text-navy-900 dark:text-white">Change password</h1>
         <p className="mb-6 text-sm text-gray-500 dark:text-gray-400">
           {mustChangeCredentials
-            ? 'You must set a permanent password before continuing.'
+            ? 'You are using a temporary password. You must change it before continuing.'
             : 'Update your account password.'}
         </p>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <Input
-            label="Current password"
+            label={mustChangeCredentials ? 'Temporary password' : 'Current password'}
             type="password"
             name="current-password"
             autoComplete="current-password"

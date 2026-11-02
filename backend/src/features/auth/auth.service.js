@@ -101,9 +101,10 @@ async function bootstrapSuperAdmin({ email, password }) {
 
 // Called by School & Platform Management when a new school is created.
 // Business Rule #2: every new school is created together with exactly one
-// initial School Admin account, whose credentials the owner establishes
-// themselves (Business Rule #9) via the password-recovery flow, since no
-// password is set here.
+// initial School Admin account. A one-time temporary password is generated
+// here and returned to the creating Super Admin exactly once (only its hash
+// is stored, it is never logged); the account stays MUST_CHANGE_CREDENTIALS,
+// so the School Admin is forced to set their own password on first login.
 async function createInitialSchoolAdmin({ email, schoolId }) {
   assertValidEmailFormat(email);
 
@@ -112,16 +113,17 @@ async function createInitialSchoolAdmin({ email, schoolId }) {
     throw new ConflictError('An account with this email already exists');
   }
 
+  const temporaryPassword = generateTemporaryPassword();
   const account = await repository.create({
     email,
-    passwordHash: null,
+    passwordHash: await hashPassword(temporaryPassword),
     role: 'SCHOOL_ADMIN',
     status: 'MUST_CHANGE_CREDENTIALS',
     schoolId,
   });
 
   await recordAuditEvent({ schoolId, userId: account.id, action: 'ACCOUNT_CREATED' });
-  return sanitizeAccount(account);
+  return { account: sanitizeAccount(account), temporaryPassword };
 }
 
 // General account creation, enforcing the role-creation matrix from
@@ -158,8 +160,13 @@ async function createAccount({ email, role, schoolId }, actingUser, tx) {
       targetSchoolId = schoolId;
     }
   } else if (actingUser.role === 'SCHOOL_ADMIN') {
-    if (!['ACCOUNTANT', 'TEACHER', 'STUDENT'].includes(role)) {
-      throw new AuthorizationError('School Admin may only create Accountant, Teacher, or Student accounts');
+    // MANAGER added by ACR-010 (docs/01-architecture/Architecture-Decision-
+    // Records/ACR-010-Manager-Role-Introduction.md): School Admin creates a
+    // Manager account directly, the same simple shape as Accountant/Student —
+    // no employment-lifecycle counterpart to Teacher's own onboarding exists
+    // for Manager in this version.
+    if (!['ACCOUNTANT', 'TEACHER', 'STUDENT', 'MANAGER'].includes(role)) {
+      throw new AuthorizationError('School Admin may only create Accountant, Teacher, Student, or Manager accounts');
     }
     // School Admin may only create accounts within their own school, per
     // Multi-Tenancy.md — tenant context always comes from the authenticated user.
@@ -202,6 +209,19 @@ async function listAccounts({ schoolId, role }, actingUser) {
 
   const accounts = await repository.list({ schoolId: effectiveSchoolId, role: effectiveRole });
   return accounts.map(sanitizeAccount);
+}
+
+// (Attendance Management) Narrow, read-only interface for another feature to
+// list this school's own Accounts of specific roles — mirrors
+// classesService.getClassById/academicYearsService.getAcademicYearById's own
+// "no authorization check of its own; the calling feature's route-level gate
+// already applies" contract, the same Stable Public Service Interface
+// pattern every other feature already follows. Excludes DEACTIVATED accounts
+// only — a locked-out account is still a real staff member whose attendance
+// may need recording. Never returns passwordHash (sanitizeAccount strips it).
+async function listAccountsByRole(schoolId, roles) {
+  const accounts = await repository.list({ schoolId });
+  return accounts.filter((a) => roles.includes(a.role) && a.status !== 'DEACTIVATED').map(sanitizeAccount);
 }
 
 // ---------------------------------------------------------------------------
@@ -444,7 +464,13 @@ function assertCanManageAccount(actingUser, targetAccount) {
   if (actingUser.role === 'SUPER_ADMIN' && ['SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(targetAccount.role)) {
     return;
   }
-  if (actingUser.role === 'SCHOOL_ADMIN' && ['ACCOUNTANT', 'TEACHER', 'STUDENT'].includes(targetAccount.role)) {
+  // MANAGER added by ACR-010 — School Admin creates/deactivates/reactivates
+  // Manager accounts within their own school, the same scope as Accountant/
+  // Teacher/Student (Attendance-Management.md's Actors > Manager section).
+  if (
+    actingUser.role === 'SCHOOL_ADMIN' &&
+    ['ACCOUNTANT', 'TEACHER', 'STUDENT', 'MANAGER'].includes(targetAccount.role)
+  ) {
     if (actingUser.schoolId !== targetAccount.schoolId) {
       throw new NotFoundError('Account not found');
     }
@@ -590,6 +616,116 @@ async function unlockAccount(accountId, actingUser) {
   return sanitizeAccount(updated);
 }
 
+// Business Rules #29-30 (ACR-011): School Admin may directly invalidate a
+// Teacher/Manager/Accountant account's current password within their own
+// school. Deliberately narrower than assertCanManageAccount's own
+// create/deactivate/reactivate scope (which also covers Student and is
+// reused, unmodified, by those actions) — Student is never a valid target
+// here, per the Product Owner's explicit approved scope. Only SCHOOL_ADMIN
+// may call this; SUPER_ADMIN gains no new authority through this function,
+// and no role may reset another account of the same or a different
+// school-staff role — this is the only branch in this function, full stop.
+const ADMINISTRATIVE_PASSWORD_RESET_TARGET_ROLES = ['TEACHER', 'MANAGER', 'ACCOUNTANT'];
+
+// ACR-012: guarantees this project's own password-strength rule
+// (isStrongPassword in auth.validation.js: >=8 chars, at least one letter,
+// at least one digit) BY CONSTRUCTION, rather than hoping a purely random
+// string happens to satisfy it. Ambiguous-looking characters (0/O, 1/l/I)
+// are excluded since this value is meant to be read and relayed by a human,
+// not copy-pasted from a link.
+const TEMP_PASSWORD_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz';
+const TEMP_PASSWORD_DIGITS = '23456789';
+const TEMP_PASSWORD_LENGTH = 12;
+
+function randomIndex(max) {
+  return crypto.randomBytes(1)[0] % max;
+}
+
+function generateTemporaryPassword() {
+  const all = TEMP_PASSWORD_LETTERS + TEMP_PASSWORD_DIGITS;
+  const chars = [
+    TEMP_PASSWORD_LETTERS[randomIndex(TEMP_PASSWORD_LETTERS.length)],
+    TEMP_PASSWORD_DIGITS[randomIndex(TEMP_PASSWORD_DIGITS.length)],
+  ];
+  while (chars.length < TEMP_PASSWORD_LENGTH) {
+    chars.push(all[randomIndex(all.length)]);
+  }
+  // Fisher-Yates shuffle — the two guaranteed characters above must not
+  // always land in positions 0/1.
+  for (let i = chars.length - 1; i > 0; i -= 1) {
+    const j = randomIndex(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
+}
+
+async function resetPasswordAdministratively(accountId, actingUser) {
+  if (!['SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(actingUser.role)) {
+    throw new AuthorizationError();
+  }
+
+  const target = await repository.findById(accountId);
+  if (!target) {
+    throw new NotFoundError('Account not found');
+  }
+
+  // Super Admin may reset a School Admin's password only — never school
+  // staff (Teacher/Manager/Accountant stay School Admin's authority, ACR-011)
+  // and never another Super Admin.
+  const isSuperAdminResettingSchoolAdmin = actingUser.role === 'SUPER_ADMIN';
+  if (isSuperAdminResettingSchoolAdmin) {
+    if (target.role !== 'SCHOOL_ADMIN') {
+      throw new AuthorizationError();
+    }
+  } else {
+    // Role-scope mismatch (e.g. targeting a Student or another School Admin)
+    // is a 403, not a tenant leak — same distinction assertCanManageAccount's
+    // own comment already draws between the two failure kinds.
+    if (!ADMINISTRATIVE_PASSWORD_RESET_TARGET_ROLES.includes(target.role)) {
+      throw new AuthorizationError();
+    }
+    // Cross-school is a 404, never a 403, so the response never confirms an
+    // account exists outside the caller's own tenant (Multi-Tenancy.md's API
+    // Rules — the same protection assertCanManageAccount already applies).
+    if (actingUser.schoolId !== target.schoolId) {
+      throw new NotFoundError('Account not found');
+    }
+  }
+
+  // A Super Admin reset of a School Admin always generates a temporary
+  // password, the same as initial School Admin creation. For School Admin
+  // resetting staff, ACR-012 still applies: only in `development` mode — an
+  // environment with no real delivery channel at all — does this action
+  // generate a real credential. Every other mode keeps ACR-011's original
+  // invalidate-only behavior (passwordHash stays null; Business Rule #8
+  // applies without exception), per Business Rule #30 as amended by ACR-012.
+  let temporaryPassword = null;
+  let passwordHash = null;
+  if (isSuperAdminResettingSchoolAdmin || PASSWORD_RESET_DELIVERY_MODE === 'development') {
+    temporaryPassword = generateTemporaryPassword();
+    passwordHash = await hashPassword(temporaryPassword);
+  }
+
+  const updated = await repository.resetPasswordAdministratively(accountId, passwordHash);
+  // Per Security-Standards.md: an immediate credential invalidation must
+  // also revoke any session issued under the old credential — the same
+  // reasoning changeRole's own role-change revocation already follows.
+  await repository.revokeAllRefreshTokensForAccount(accountId);
+
+  // Never includes temporaryPassword — the audit trail records only that a
+  // reset occurred and who performed it, per Business Rule #30 (unchanged
+  // by ACR-012: the one-time value is returned to the caller below, never
+  // logged anywhere).
+  await recordAuditEvent({
+    schoolId: target.schoolId,
+    userId: actingUser.id,
+    action: 'ADMINISTRATIVE_PASSWORD_RESET',
+    metadata: { targetAccountId: accountId },
+  });
+
+  return { account: sanitizeAccount(updated), temporaryPassword };
+}
+
 async function changeRole(accountId, newRole, actingUser) {
   if (accountId === actingUser.id) {
     // Business Rule #7: no user may grant themselves a role or permission
@@ -617,6 +753,12 @@ async function changeRole(accountId, newRole, actingUser) {
   }
 
   if (actingUser.role === 'SCHOOL_ADMIN') {
+    // Deliberately NOT extended to MANAGER: ACR-010 approves School Admin
+    // creating, deactivating, and reactivating a Manager account directly —
+    // it says nothing about converting an existing account's role into or
+    // out of MANAGER, so this function's scope is left unchanged rather than
+    // assuming that extension. A Manager account is always created directly
+    // as MANAGER via createAccount, never produced by a role change.
     if (!['ACCOUNTANT', 'TEACHER', 'STUDENT'].includes(newRole)) {
       throw new AuthorizationError('School Admin may only assign Accountant, Teacher, or Student roles');
     }
@@ -639,6 +781,7 @@ module.exports = {
   createInitialSchoolAdmin,
   createAccount,
   listAccounts,
+  listAccountsByRole,
   login,
   logout,
   refreshAccessToken,
@@ -648,6 +791,7 @@ module.exports = {
   deactivateAccount,
   reactivateAccount,
   unlockAccount,
+  resetPasswordAdministratively,
   changeRole,
   sanitizeAccount,
 };

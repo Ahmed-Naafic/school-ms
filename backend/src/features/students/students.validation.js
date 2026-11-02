@@ -33,15 +33,30 @@ function validateSectionId(body, errors) {
   }
 }
 
+// (ACR-004) Shape only — whether an academicYearId belongs to this school or
+// is Archived are data-dependent business rules enforced by
+// assertAcademicYearEnrollable in the service layer, not here, mirroring
+// sectionId's own validation/service split. Unlike sectionId, Enrollment
+// requires this field unconditionally (Business Rule #21); Promotion does
+// not, since its absence is a valid "use the Current Academic Year" signal
+// handled entirely in the service layer (Business Rule #23).
+function validateAcademicYearId(body, errors, { required }) {
+  if (body.academicYearId !== undefined && typeof body.academicYearId !== 'string') {
+    errors.academicYearId = 'Academic Year must be a string identifier.';
+    return;
+  }
+  if (required && (!body.academicYearId || body.academicYearId.trim().length === 0)) {
+    errors.academicYearId = 'An Academic Year is required.';
+  }
+}
+
 function validateEnrollStudent(body) {
   const errors = {};
 
   if (!body.classId || typeof body.classId !== 'string') {
     errors.classId = 'A Class is required.';
   }
-  if (!body.academicYear || typeof body.academicYear !== 'string' || body.academicYear.trim().length === 0) {
-    errors.academicYear = 'Academic year is required.';
-  }
+  validateAcademicYearId(body, errors, { required: true });
   validateSectionId(body, errors);
 
   if (Object.keys(errors).length > 0) {
@@ -55,9 +70,7 @@ function validatePromoteStudent(body) {
   if (body.classId !== undefined && typeof body.classId !== 'string') {
     errors.classId = 'Class must be a string identifier.';
   }
-  if (!body.academicYear || typeof body.academicYear !== 'string' || body.academicYear.trim().length === 0) {
-    errors.academicYear = 'Academic year is required.';
-  }
+  validateAcademicYearId(body, errors, { required: false });
   validateSectionId(body, errors);
 
   if (Object.keys(errors).length > 0) {

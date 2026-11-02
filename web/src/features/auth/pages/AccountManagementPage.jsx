@@ -1,11 +1,20 @@
 import React from 'react';
-import { Button, Card, IconButton, Tooltip } from '../../../shared/components';
+import { Button, Card, Dialog, IconButton, Tooltip } from '../../../shared/components';
 import { useAuth } from '../../../shared/auth/AuthContext';
 import { useToast } from '../../../shared/toast/ToastContext';
 import { AccountStatusBadge } from '../components/AccountStatusBadge';
 import { CreateAccountDialog } from '../components/CreateAccountDialog';
 import * as authService from '../services/auth.service';
 import * as schoolsService from '../../schools/services/schools.service';
+
+// ACR-011, Business Rules #29-30: the "Reset Password" action is rendered
+// for School Admin on Teacher/Manager/Accountant rows, and for Super Admin on
+// School Admin rows only — mirrors the backend's own role-scope check
+// exactly, so the button never offers a request the server would reject.
+const ADMINISTRATIVE_PASSWORD_RESET_TARGET_ROLES = {
+  SCHOOL_ADMIN: ['TEACHER', 'MANAGER', 'ACCOUNTANT'],
+  SUPER_ADMIN: ['SCHOOL_ADMIN'],
+};
 
 export function AccountManagementPage() {
   const { account } = useAuth();
@@ -15,6 +24,10 @@ export function AccountManagementPage() {
   const [schools, setSchools] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [dialogOpen, setDialogOpen] = React.useState(false);
+  // Always populated for a Super Admin resetting a School Admin; for a School
+  // Admin resetting staff, only when the backend's password-reset delivery
+  // mode is `development` (ACR-012) — otherwise this dialog never opens.
+  const [temporaryPasswordInfo, setTemporaryPasswordInfo] = React.useState(null);
 
   const loadAccounts = React.useCallback(async () => {
     setLoading(true);
@@ -43,6 +56,28 @@ export function AccountManagementPage() {
     try {
       await action(accountId);
       showToast({ tone: 'success', title: successMessage });
+      loadAccounts();
+    } catch (err) {
+      showToast({ tone: 'danger', title: 'Action failed', description: err.message });
+    }
+  };
+
+  // Separate from runAction: the response shape is { account,
+  // temporaryPassword }, and success is shown as a one-time dialog (dev mode
+  // only) rather than a toast, since the value must stay on screen long
+  // enough to copy — a toast auto-dismisses.
+  const handleResetPassword = async (acc) => {
+    try {
+      const result = await authService.resetPasswordAdministratively(acc.id);
+      if (result.temporaryPassword) {
+        setTemporaryPasswordInfo({ email: acc.email, password: result.temporaryPassword });
+      } else {
+        showToast({
+          tone: 'success',
+          title: 'Password reset',
+          description: 'They must set a new one via Forgotten Password on the login page.',
+        });
+      }
       loadAccounts();
     } catch (err) {
       showToast({ tone: 'danger', title: 'Action failed', description: err.message });
@@ -111,6 +146,13 @@ export function AccountManagementPage() {
                           </IconButton>
                         </Tooltip>
                       )}
+                      {ADMINISTRATIVE_PASSWORD_RESET_TARGET_ROLES[account.role]?.includes(acc.role) && (
+                        <Tooltip label="Reset password">
+                          <IconButton label="Reset password" onClick={() => handleResetPassword(acc)}>
+                            <KeyIcon />
+                          </IconButton>
+                        </Tooltip>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -127,6 +169,18 @@ export function AccountManagementPage() {
         onCreate={handleCreate}
         schoolOptions={schools}
       />
+
+      <Dialog
+        open={temporaryPasswordInfo !== null}
+        title="Temporary password generated"
+        description={`Share this with ${temporaryPasswordInfo?.email} directly — it will not be shown again. They must set their own permanent password the moment they log in with it.`}
+        cancelLabel="Done"
+        onClose={() => setTemporaryPasswordInfo(null)}
+      >
+        <p className="rounded-md border border-gray-300 bg-gray-50 px-4 py-3 text-center font-mono text-lg font-bold tracking-wide text-navy-900 dark:border-gray-500 dark:bg-navy-800 dark:text-white">
+          {temporaryPasswordInfo?.password}
+        </p>
+      </Dialog>
     </div>
   );
 }
@@ -152,6 +206,15 @@ function UnlockIcon() {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="11" width="18" height="11" rx="2" />
       <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+    </svg>
+  );
+}
+
+function KeyIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7.5" cy="15.5" r="5.5" />
+      <path d="m21 2-9.6 9.6M15.5 7.5 18 10M18.5 6.5 21 9" />
     </svg>
   );
 }

@@ -77,6 +77,19 @@ const unlockAccount = asyncHandler(async (req, res) => {
   return sendSuccess(res, { message: 'Account unlocked', data: account });
 });
 
+const resetPasswordAdministratively = asyncHandler(async (req, res) => {
+  const result = await service.resetPasswordAdministratively(req.params.accountId, req.user);
+  return sendSuccess(res, {
+    // ACR-012: only present when PASSWORD_RESET_DELIVERY_MODE=development —
+    // every other mode returns temporaryPassword: null, matching ACR-011's
+    // original invalidate-only behavior unchanged.
+    message: result.temporaryPassword
+      ? 'Password reset. Share this temporary password with the account owner directly — it will not be shown again, and they must change it on first login.'
+      : 'Password reset. The account owner must establish a new password via Forgotten Password Recovery.',
+    data: result,
+  });
+});
+
 const changeRole = asyncHandler(async (req, res) => {
   validation.validateRoleChange(req.body);
   const account = await service.changeRole(req.params.accountId, req.body.role, req.user);
@@ -95,5 +108,6 @@ module.exports = {
   deactivateAccount,
   reactivateAccount,
   unlockAccount,
+  resetPasswordAdministratively,
   changeRole,
 };

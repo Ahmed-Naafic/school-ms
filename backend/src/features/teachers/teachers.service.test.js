@@ -348,3 +348,21 @@ describe('listTeachers', () => {
     expect(result).toEqual({ teachers: [{ id: 't1' }], total: 1, page: 1, pageSize: 20 });
   });
 });
+
+describe('stable public service interface — getTeacherById (Teacher Subject Assignment)', () => {
+  it('returns null for a nonexistent Teacher', async () => {
+    repository.findById.mockResolvedValue(null);
+    await expect(service.getTeacherById('school-1', 'missing')).resolves.toBeNull();
+  });
+
+  it('returns null for a cross-tenant Teacher, never exposing another school\'s data', async () => {
+    repository.findById.mockResolvedValue({ id: 't1', schoolId: 'school-2' });
+    await expect(service.getTeacherById('school-1', 't1')).resolves.toBeNull();
+  });
+
+  it('returns the record for the correct tenant', async () => {
+    const teacher = { id: 't1', schoolId: 'school-1', employmentStatus: 'ACTIVE' };
+    repository.findById.mockResolvedValue(teacher);
+    await expect(service.getTeacherById('school-1', 't1')).resolves.toBe(teacher);
+  });
+});

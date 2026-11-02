@@ -1,16 +1,28 @@
 jest.mock('./schools.repository');
 jest.mock('../../shared/audit');
 jest.mock('../auth/auth.service');
+jest.mock('../school-schedule/school-schedule.service');
+jest.mock('../timetable/timetable.service');
+jest.mock('../classes/classes.service');
+jest.mock('../subjects/subjects.service');
 
 const repository = require('./schools.repository');
 const { recordAuditEvent } = require('../../shared/audit');
 const authService = require('../auth/auth.service');
+const schoolScheduleService = require('../school-schedule/school-schedule.service');
+const timetableService = require('../timetable/timetable.service');
+const classesService = require('../classes/classes.service');
+const subjectsService = require('../subjects/subjects.service');
 const service = require('./schools.service');
 
 const actingUser = { id: 'super-1', role: 'SUPER_ADMIN' };
 
 beforeEach(() => {
   jest.clearAllMocks();
+  schoolScheduleService.createDefaultScheduleForSchool.mockResolvedValue({ id: 'shift-1' });
+  timetableService.createDefaultOptimizationSettingsForSchool.mockResolvedValue({ id: 'settings-1' });
+  // (ACR-009, Architecture Update — Grade/Form)
+  classesService.createDefaultGradeLevelForSchool.mockResolvedValue({ id: 'grade-level-1' });
 });
 
 describe('createSchool (Business Rules #1, #2, #16)', () => {
@@ -25,24 +37,62 @@ describe('createSchool (Business Rules #1, #2, #16)', () => {
 
   it('creates the school and its first School Admin account together', async () => {
     repository.findByName.mockResolvedValue(null);
-    repository.create.mockResolvedValue({ id: 'school-1', name: 'New School' });
-    authService.createInitialSchoolAdmin.mockResolvedValue({ id: 'admin-account-1' });
+    repository.create.mockResolvedValue({ id: 'school-1', name: 'New School', educationLevels: ['PRIMARY'] });
+    authService.createInitialSchoolAdmin.mockResolvedValue({
+      account: { id: 'admin-account-1' },
+      temporaryPassword: 'TempPass1234',
+    });
 
-    await service.createSchool({ name: 'New School', firstSchoolAdminEmail: 'admin@example.com' }, actingUser);
+    const result = await service.createSchool(
+      { name: 'New School', firstSchoolAdminEmail: 'admin@example.com' },
+      actingUser
+    );
 
+    expect(result.initialSchoolAdmin).toEqual({ email: 'admin@example.com', temporaryPassword: 'TempPass1234' });
     expect(repository.create).toHaveBeenCalledWith({ name: 'New School' });
+    expect(schoolScheduleService.createDefaultScheduleForSchool).toHaveBeenCalledWith('school-1', actingUser);
+    expect(timetableService.createDefaultOptimizationSettingsForSchool).toHaveBeenCalledWith('school-1');
+    expect(classesService.createDefaultGradeLevelForSchool).toHaveBeenCalledWith('school-1', 'PRIMARY');
     expect(authService.createInitialSchoolAdmin).toHaveBeenCalledWith({
       email: 'admin@example.com',
       schoolId: 'school-1',
     });
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'SCHOOL_CREATED' }));
   });
+
+  it('creates the default School Calendar/Shift and Optimization Settings before the first School Admin account', async () => {
+    repository.findByName.mockResolvedValue(null);
+    repository.create.mockResolvedValue({ id: 'school-1', name: 'New School', educationLevels: ['PRIMARY'] });
+    authService.createInitialSchoolAdmin.mockResolvedValue({ id: 'admin-account-1' });
+
+    const callOrder = [];
+    schoolScheduleService.createDefaultScheduleForSchool.mockImplementation(async () => {
+      callOrder.push('schedule');
+      return { id: 'shift-1' };
+    });
+    timetableService.createDefaultOptimizationSettingsForSchool.mockImplementation(async () => {
+      callOrder.push('optimization-settings');
+      return { id: 'settings-1' };
+    });
+    classesService.createDefaultGradeLevelForSchool.mockImplementation(async () => {
+      callOrder.push('grade-level');
+      return { id: 'grade-level-1' };
+    });
+    authService.createInitialSchoolAdmin.mockImplementation(async () => {
+      callOrder.push('admin');
+      return { id: 'admin-account-1' };
+    });
+
+    await service.createSchool({ name: 'New School', firstSchoolAdminEmail: 'admin@example.com' }, actingUser);
+
+    expect(callOrder).toEqual(['schedule', 'optimization-settings', 'grade-level', 'admin']);
+  });
 });
 
 describe('createSchool orphan-rollback (regression)', () => {
   it('deletes the just-created School if the mandatory first School Admin account fails to be created', async () => {
     repository.findByName.mockResolvedValue(null);
-    repository.create.mockResolvedValue({ id: 'school-1', name: 'New School' });
+    repository.create.mockResolvedValue({ id: 'school-1', name: 'New School', educationLevels: ['PRIMARY'] });
     authService.createInitialSchoolAdmin.mockRejectedValue(new Error('email already exists'));
 
     await expect(
@@ -50,6 +100,49 @@ describe('createSchool orphan-rollback (regression)', () => {
     ).rejects.toThrow('email already exists');
 
     expect(repository.hardDeleteIncompleteSchool).toHaveBeenCalledWith('school-1');
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it('deletes the just-created School if the default School Calendar/Shift fails to be created', async () => {
+    repository.findByName.mockResolvedValue(null);
+    repository.create.mockResolvedValue({ id: 'school-1', name: 'New School', educationLevels: ['PRIMARY'] });
+    schoolScheduleService.createDefaultScheduleForSchool.mockRejectedValue(new Error('unexpected failure'));
+
+    await expect(
+      service.createSchool({ name: 'New School', firstSchoolAdminEmail: 'admin@example.com' }, actingUser)
+    ).rejects.toThrow('unexpected failure');
+
+    expect(repository.hardDeleteIncompleteSchool).toHaveBeenCalledWith('school-1');
+    expect(authService.createInitialSchoolAdmin).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it('deletes the just-created School if the default School Optimization Settings fail to be created', async () => {
+    repository.findByName.mockResolvedValue(null);
+    repository.create.mockResolvedValue({ id: 'school-1', name: 'New School', educationLevels: ['PRIMARY'] });
+    timetableService.createDefaultOptimizationSettingsForSchool.mockRejectedValue(new Error('unexpected failure'));
+
+    await expect(
+      service.createSchool({ name: 'New School', firstSchoolAdminEmail: 'admin@example.com' }, actingUser)
+    ).rejects.toThrow('unexpected failure');
+
+    expect(repository.hardDeleteIncompleteSchool).toHaveBeenCalledWith('school-1');
+    expect(authService.createInitialSchoolAdmin).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  // (ACR-009, Architecture Update — Grade/Form)
+  it('deletes the just-created School if the default GradeLevel fails to be created', async () => {
+    repository.findByName.mockResolvedValue(null);
+    repository.create.mockResolvedValue({ id: 'school-1', name: 'New School', educationLevels: ['PRIMARY'] });
+    classesService.createDefaultGradeLevelForSchool.mockRejectedValue(new Error('unexpected failure'));
+
+    await expect(
+      service.createSchool({ name: 'New School', firstSchoolAdminEmail: 'admin@example.com' }, actingUser)
+    ).rejects.toThrow('unexpected failure');
+
+    expect(repository.hardDeleteIncompleteSchool).toHaveBeenCalledWith('school-1');
+    expect(authService.createInitialSchoolAdmin).not.toHaveBeenCalled();
     expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 });
@@ -193,12 +286,25 @@ describe('updateEducationLevels (ACR-003, Business Rule #17)', () => {
     expect(repository.updateEducationLevels).toHaveBeenCalledWith('s1', ['PRIMARY']);
   });
 
-  it('rejects a submission that would remove a level the school currently has', async () => {
+  it('removes a dropped level and unassigns its Subjects', async () => {
     repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY', 'SECONDARY'] });
+    repository.updateEducationLevels.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY'] });
+    subjectsService.findLevelRemovalBlockers.mockResolvedValue([]);
 
-    await expect(service.updateEducationLevels('s1', ['SECONDARY'], actingUser)).rejects.toThrow(
-      'Cannot remove Education Level(s) PRIMARY — removal is not supported yet.'
+    await service.updateEducationLevels('s1', ['PRIMARY'], actingUser);
+
+    expect(subjectsService.removeAllSubjectsOfLevelFromSchool).toHaveBeenCalledWith('s1', 'SECONDARY', actingUser);
+    expect(repository.updateEducationLevels).toHaveBeenCalledWith('s1', ['PRIMARY']);
+  });
+
+  it('rejects dropping a level whose Subjects are still in use, changing nothing', async () => {
+    repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY', 'SECONDARY'] });
+    subjectsService.findLevelRemovalBlockers.mockResolvedValue(['Math: 1 Teacher Subject Assignment']);
+
+    await expect(service.updateEducationLevels('s1', ['PRIMARY'], actingUser)).rejects.toThrow(
+      'these Subjects are still in use: Math: 1 Teacher Subject Assignment'
     );
+    expect(subjectsService.removeAllSubjectsOfLevelFromSchool).not.toHaveBeenCalled();
     expect(repository.updateEducationLevels).not.toHaveBeenCalled();
   });
 
@@ -208,6 +314,49 @@ describe('updateEducationLevels (ACR-003, Business Rule #17)', () => {
     await expect(service.updateEducationLevels('missing', ['PRIMARY'], actingUser)).rejects.toThrow(
       'School not found'
     );
+  });
+});
+
+describe('Subject auto-assignment on Education Level gain', () => {
+  it('auto-assigns only the newly added level Subjects', async () => {
+    repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY'] });
+    repository.updateEducationLevels.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY', 'SECONDARY'] });
+
+    await service.updateEducationLevels('s1', ['PRIMARY', 'SECONDARY'], actingUser);
+
+    expect(subjectsService.assignAllActiveSubjectsOfLevelToSchool).toHaveBeenCalledTimes(1);
+    expect(subjectsService.assignAllActiveSubjectsOfLevelToSchool).toHaveBeenCalledWith('s1', 'SECONDARY', actingUser);
+  });
+
+  it('auto-assigns nothing when the set is unchanged', async () => {
+    repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY'] });
+    repository.updateEducationLevels.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY'] });
+
+    await service.updateEducationLevels('s1', ['PRIMARY'], actingUser);
+
+    expect(subjectsService.assignAllActiveSubjectsOfLevelToSchool).not.toHaveBeenCalled();
+  });
+
+  it('does not fail the level change when auto-assignment fails', async () => {
+    repository.findById.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY'] });
+    repository.updateEducationLevels.mockResolvedValue({ id: 's1', educationLevels: ['PRIMARY', 'SECONDARY'] });
+    subjectsService.assignAllActiveSubjectsOfLevelToSchool.mockRejectedValueOnce(new Error('boom'));
+    jest.spyOn(console, 'error').mockImplementationOnce(() => {});
+
+    await expect(service.updateEducationLevels('s1', ['PRIMARY', 'SECONDARY'], actingUser)).resolves.toEqual({
+      id: 's1',
+      educationLevels: ['PRIMARY', 'SECONDARY'],
+    });
+  });
+
+  it('auto-assigns the default level Subjects of a new school', async () => {
+    repository.findByName.mockResolvedValue(null);
+    repository.create.mockResolvedValue({ id: 'school-1', name: 'New School', educationLevels: ['PRIMARY'] });
+    authService.createInitialSchoolAdmin.mockResolvedValue({ id: 'admin-1' });
+
+    await service.createSchool({ name: 'New School', firstSchoolAdminEmail: 'admin@example.com' }, actingUser);
+
+    expect(subjectsService.assignAllActiveSubjectsOfLevelToSchool).toHaveBeenCalledWith('school-1', 'PRIMARY', actingUser);
   });
 });
 

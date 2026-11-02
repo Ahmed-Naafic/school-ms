@@ -1,24 +1,26 @@
 import React from 'react';
-import { Dialog, Select, Input } from '../../../shared/components';
+import { Dialog, Select } from '../../../shared/components';
 import { formatClassSectionName } from '../../classes/utils/format-class-section-name';
 
 // classes (full, nested-Section objects) is used only to build the Section
 // picker for whichever Class is currently selected — classOptions (flat
 // id/label pairs) still drives the Class picker itself, unchanged.
-export function EnrollStudentDialog({ open, onClose, onEnroll, classOptions, classes = [] }) {
+// (ACR-004) academicYearOptions — flat id/label pairs sourced from Academic
+// Year Management's own ACTIVE list, replacing the old free-text input.
+export function EnrollStudentDialog({ open, onClose, onEnroll, classOptions, classes = [], academicYearOptions = [] }) {
   const [classId, setClassId] = React.useState('');
   const [sectionId, setSectionId] = React.useState('');
-  const [academicYear, setAcademicYear] = React.useState('');
+  const [academicYearId, setAcademicYearId] = React.useState('');
   const [error, setError] = React.useState(null);
   const [submitting, setSubmitting] = React.useState(false);
 
   React.useEffect(() => {
     if (open) {
       setClassId(classOptions?.[0]?.value || '');
-      setAcademicYear('');
+      setAcademicYearId(academicYearOptions?.[0]?.value || '');
       setError(null);
     }
-  }, [open, classOptions]);
+  }, [open, classOptions, academicYearOptions]);
 
   const selectedClass = classes.find((c) => c.id === classId);
   const activeSections = (selectedClass?.sections || []).filter((s) => s.status === 'ACTIVE');
@@ -38,7 +40,7 @@ export function EnrollStudentDialog({ open, onClose, onEnroll, classOptions, cla
     setError(null);
     setSubmitting(true);
     try {
-      await onEnroll({ classId, sectionId: sectionId || undefined, academicYear });
+      await onEnroll({ classId, sectionId: sectionId || undefined, academicYearId });
       onClose();
     } catch (err) {
       setError(err.message);
@@ -66,11 +68,15 @@ export function EnrollStudentDialog({ open, onClose, onEnroll, classOptions, cla
             required
           />
         )}
-        <Input
-          label="Academic year"
-          placeholder="e.g. 2025/2026"
-          value={academicYear}
-          onChange={(e) => setAcademicYear(e.target.value)}
+        <Select
+          label="Academic Year"
+          value={academicYearId}
+          onChange={(e) => setAcademicYearId(e.target.value)}
+          options={
+            academicYearOptions.length > 0
+              ? academicYearOptions
+              : [{ value: '', label: 'No Academic Years yet — create one first' }]
+          }
           required
         />
         {error && <p className="text-[13px] text-danger">{error}</p>}

@@ -28,4 +28,11 @@ export const reactivateAccount = (accountId) => api.patch(`/auth/accounts/${acco
 
 export const unlockAccount = (accountId) => api.patch(`/auth/accounts/${accountId}/unlock`);
 
+// ACR-011, Business Rules #29-30: School Admin resets Teacher/Manager/
+// Accountant within their own school; Super Admin resets School Admin
+// accounts. Returns { account, temporaryPassword } — temporaryPassword is
+// always set for a Super Admin reset, and for School Admin resets only in
+// development mode (ACR-012).
+export const resetPasswordAdministratively = (accountId) => api.patch(`/auth/accounts/${accountId}/reset-password`);
+
 export const changeRole = (accountId, role) => api.patch(`/auth/accounts/${accountId}/role`, { role });

@@ -85,6 +85,21 @@ function unlockAccount(id) {
   });
 }
 
+// Business Rule #30 (ACR-011, amended by ACR-012): invalidates the account
+// exactly the way a freshly created account starts out (status
+// MUST_CHANGE_CREDENTIALS — see `create` above/createAccount in
+// auth.service.js). passwordHash defaults to null (ACR-011's original
+// invalidate-only behavior — the account owner re-establishes their own
+// password via Forgotten Password Recovery); the caller passes an
+// already-hashed value only in development mode (ACR-012), never a
+// plaintext one — this function itself never sees or handles plaintext.
+function resetPasswordAdministratively(id, passwordHash = null) {
+  return prisma.account.update({
+    where: { id },
+    data: { passwordHash, status: 'MUST_CHANGE_CREDENTIALS', failedLoginAttempts: 0, lockedUntil: null },
+  });
+}
+
 function createRefreshToken(data) {
   return prisma.refreshToken.create({ data });
 }
@@ -124,6 +139,7 @@ module.exports = {
   list,
   countActiveSuperAdmins,
   updatePasswordHash,
+  resetPasswordAdministratively,
   updateStatus,
   updateRole,
   recordFailedAttempt,

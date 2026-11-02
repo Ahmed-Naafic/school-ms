@@ -240,6 +240,7 @@ describe('Attendance Management', () => {
       ['patch', '/api/v1/attendance/manager/records/nonexistent-id'],
       ['post', '/api/v1/attendance/staff/me/come'],
       ['get', '/api/v1/attendance/manager/staff'],
+      ['post', '/api/v1/attendance/manager/staff/nonexistent-id/come'],
       ['patch', '/api/v1/attendance/manager/staff/nonexistent-id/excuse'],
       ['patch', '/api/v1/attendance/manager/staff/nonexistent-id/excuse-historical'],
       ['patch', '/api/v1/attendance/manager/staff/nonexistent-id/unexcuse'],
@@ -462,10 +463,12 @@ describe('Attendance Management', () => {
 
     beforeAll(async () => {
       staffFx = await buildFixture('staff');
-      // Settings deliberately chosen relative to FAKE_NOW (13:15): late
-      // threshold before it (so a "Come" lands LATE), absence cutoff well
-      // after it (so an un-recorded staff member reads NOT_RECORDED, not
-      // ABSENT, until a dedicated test below moves the cutoff earlier).
+      // Settings deliberately chosen relative to FAKE_NOW's Africa/Mogadishu
+      // wall-clock reading (Business Rule #43) — FAKE_NOW is 13:15 UTC, i.e.
+      // 16:15 in Mogadishu (UTC+3, no DST): late threshold well before it (so
+      // a "Come" lands LATE), absence cutoff well after it (so an
+      // un-recorded staff member reads NOT_RECORDED, not ABSENT, until a
+      // dedicated test below moves the cutoff earlier).
       await prisma.attendanceSettings.create({
         data: {
           schoolId: staffFx.schoolId,
@@ -494,9 +497,13 @@ describe('Attendance Management', () => {
     });
 
     test('rejects self "Come" before the configured start time', async () => {
+      // FAKE_NOW (13:15 UTC) is 16:15 in Africa/Mogadishu (UTC+3, Business
+      // Rule #43) — Staff Attendance Timing Settings are Mogadishu wall-clock,
+      // so the temporary start time here must be set relative to THAT, not
+      // to FAKE_NOW's raw UTC digits.
       await prisma.attendanceSettings.update({
         where: { schoolId: staffFx.schoolId },
-        data: { staffAttendanceStartTime: new Date('1970-01-01T14:00:00.000Z') },
+        data: { staffAttendanceStartTime: new Date('1970-01-01T17:00:00.000Z') },
       });
       const res = await request(app).post('/api/v1/attendance/staff/me/come').set('Authorization', `Bearer ${extraTeacher.token}`);
       expect(res.status).toBe(422);
@@ -632,11 +639,157 @@ describe('Attendance Management', () => {
       });
     });
 
-    test('removed route: POST /attendance/manager/staff/:accountId/come no longer exists', async () => {
-      const res = await request(app)
-        .post(`/api/v1/attendance/manager/staff/${presentTeacher.account.id}/come`)
-        .set('Authorization', `Bearer ${staffFx.manager.token}`);
-      expect(res.status).toBe(404);
+    // --- Manager-recorded arrival (v2.0, Business Rule #42) -----------------
+    // Reintroduces POST /attendance/manager/staff/:accountId/come, removed in
+    // v1.7 — but scoped this time to exactly the Manager's existing EXCUSED
+    // authority (Teacher/Accountant only, never another Manager, never an
+    // Admin), alongside self "Come" (Phase 13), never replacing it.
+    describe('Manager-recorded arrival for Teacher/Accountant (Business Rule #42)', () => {
+      test('a Manager can record arrival for a Teacher who has not yet self-recorded', async () => {
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-mgr-come-teacher-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const res = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${teacher.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(res.status).toBe(201);
+        expect(['PRESENT', 'LATE']).toContain(res.body.data.status);
+        expect(res.body.data.staffAccountId).toBe(teacher.account.id);
+        expect(res.body.data.recordedByAccountId).toBe(staffFx.manager.account.id); // recorder is the Manager, not the subject
+      });
+
+      test('a Manager can record arrival for an Accountant the same way', async () => {
+        const accountant = await directAccountToken(staffFx.schoolId, 'ACCOUNTANT', `staff-mgr-come-accountant-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const res = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${accountant.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(res.status).toBe(201);
+        expect(['PRESENT', 'LATE']).toContain(res.body.data.status);
+        expect(res.body.data.staffAccountId).toBe(accountant.account.id);
+        expect(res.body.data.recordedByAccountId).toBe(staffFx.manager.account.id);
+      });
+
+      test('a Manager cannot record arrival for another Manager (422) — Business Rules #16/#42, unchanged from v1.5', async () => {
+        const otherManager = await directAccountToken(staffFx.schoolId, 'MANAGER', `staff-mgr-come-othermgr-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const res = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${otherManager.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(res.status).toBe(422);
+
+        const row = await prisma.staffAttendance.findUnique({
+          where: { staffAccountId_date: { staffAccountId: otherManager.account.id, date: toDateOnlyForTest(FAKE_TODAY) } },
+        });
+        expect(row).toBeNull();
+      });
+
+      test('a Manager cannot record attendance for a School Admin account (422) — no such record exists, Business Rules #33/#42', async () => {
+        const res = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${staffFx.schoolAdmin.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(res.status).toBe(422);
+      });
+
+      test('the arrival timestamp is server-captured, and a spoofed date/recordedAt/status in the request body is ignored — identical guarantee to self "Come" (Business Rule #40, extended by #42)', async () => {
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-mgr-come-spoof-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const res = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${teacher.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`)
+          .send({ date: '2020-01-01', recordedAt: '1999-12-31T00:00:00.000Z', status: 'ABSENT' });
+        expect(res.status).toBe(201);
+        expect(res.body.data.date).toBe(new Date(`${FAKE_TODAY}T00:00:00.000Z`).toISOString());
+        expect(res.body.data.recordedAt).toBe(FAKE_NOW.toISOString());
+        expect(res.body.data.status).toBe('LATE'); // derived from FAKE_NOW against the late threshold, never the spoofed ABSENT
+
+        const spoofedRow = await prisma.staffAttendance.findUnique({
+          where: { staffAccountId_date: { staffAccountId: teacher.account.id, date: toDateOnlyForTest('2020-01-01') } },
+        });
+        expect(spoofedRow).toBeNull();
+      });
+
+      test('PRESENT/LATE is calculated automatically from the captured time, never client-supplied, for a Manager-recorded arrival', async () => {
+        const onTimeTeacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-mgr-come-ontime-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceLateThreshold: new Date('1970-01-01T23:59:00.000Z') },
+        });
+        const res = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${onTimeTeacher.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(res.status).toBe(201);
+        expect(res.body.data.status).toBe('PRESENT');
+
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceLateThreshold: new Date('1970-01-01T13:00:00.000Z') },
+        });
+      });
+
+      test('one record per staff member per day, regardless of path: Manager-recording a Teacher who already self-recorded today is rejected (409)', async () => {
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-mgr-come-dup-self-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const selfRes = await request(app).post('/api/v1/attendance/staff/me/come').set('Authorization', `Bearer ${teacher.token}`);
+        expect(selfRes.status).toBe(201);
+
+        const mgrRes = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${teacher.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(mgrRes.status).toBe(409);
+      });
+
+      test('one record per staff member per day, regardless of path: that same Teacher self-recording after being Manager-recorded is rejected (409)', async () => {
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-mgr-come-dup-mgr-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const mgrRes = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${teacher.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(mgrRes.status).toBe(201);
+
+        const selfRes = await request(app).post('/api/v1/attendance/staff/me/come').set('Authorization', `Bearer ${teacher.token}`);
+        expect(selfRes.status).toBe(409);
+      });
+
+      test('the audit event for a Manager-recorded arrival carries both the target staff member and the recording Manager as two distinct facts', async () => {
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-mgr-come-audit-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const res = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${teacher.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(res.status).toBe(201);
+
+        const audit = await prisma.auditLog.findFirst({
+          where: { schoolId: staffFx.schoolId, action: 'STAFF_ATTENDANCE_MANAGER_ARRIVAL_RECORDED', userId: staffFx.manager.account.id },
+          orderBy: { createdAt: 'desc' },
+        });
+        expect(audit).not.toBeNull();
+        expect(audit.userId).toBe(staffFx.manager.account.id); // the recording Manager
+        expect(audit.metadata.staffAccountId).toBe(teacher.account.id); // the subject — a distinct account
+      });
+
+      test('EXCUSED correction still works on a Manager-recorded row — no regression to the existing correction mechanism', async () => {
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-mgr-come-excuse-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const comeRes = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${teacher.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(comeRes.status).toBe(201);
+
+        const excuseRes = await request(app)
+          .patch(`/api/v1/attendance/manager/staff/${teacher.account.id}/excuse`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`)
+          .send({ date: FAKE_TODAY });
+        expect(excuseRes.status).toBe(200);
+        expect(excuseRes.body.data.status).toBe('EXCUSED');
+        expect(excuseRes.body.data.correctedByAccountId).toBe(staffFx.manager.account.id);
+
+        const unexcuseRes = await request(app)
+          .patch(`/api/v1/attendance/manager/staff/${teacher.account.id}/unexcuse`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`)
+          .send({ date: FAKE_TODAY });
+        expect(unexcuseRes.status).toBe(200);
+        expect(['PRESENT', 'LATE']).toContain(unexcuseRes.body.data.status); // recomputed from the Manager-recorded arrival's own real recordedAt
+      });
+
+      test('a Teacher/Accountant cannot call the Manager-recorded arrival route themselves — role-gated to MANAGER only', async () => {
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-mgr-come-rolegate-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const res = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${presentTeacher.account.id}/come`)
+          .set('Authorization', `Bearer ${teacher.token}`);
+        expect(res.status).toBe(403);
+      });
     });
 
     test('removed route: POST /attendance/admin/managers/:accountId/come no longer exists', async () => {
@@ -665,6 +818,109 @@ describe('Attendance Management', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.status).toBe('EXCUSED');
       expect(res.body.data.correctedByAccountId).toBe(staffFx.manager.account.id);
+    });
+
+    // --- Mogadishu business-time correctness (Business Rule #43, v2.1) ------
+    // The reported bug: Staff Attendance Timing Settings are entered as
+    // Africa/Mogadishu wall-clock time (UTC+3, no DST), but every "now"
+    // computation used to read raw UTC (Date#toISOString().slice(...)) — a
+    // systematic 3-hour lag between when the settings screen implies staff
+    // can check in and when they actually could. FAKE_NOW is 13:15 UTC =
+    // 16:15 Mogadishu; these tests pick settings values that only make sense
+    // (and only pass) under the corrected Mogadishu interpretation — under
+    // the old UTC-literal bug, every "succeeds"/"ABSENT"/"LATE" assertion
+    // below would have failed the other way.
+    describe('Mogadishu business-time correctness (Business Rule #43)', () => {
+      test('self "Come" succeeds when Mogadishu time is past the start time even though raw UTC time is not (the exact reported bug)', async () => {
+        // Start time "15:00" — raw UTC "now" (13:15) is before it (the old
+        // bug would reject), but Mogadishu "now" (16:15) is after it.
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceStartTime: new Date('1970-01-01T15:00:00.000Z') },
+        });
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-tz-self-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const res = await request(app).post('/api/v1/attendance/staff/me/come').set('Authorization', `Bearer ${teacher.token}`);
+        expect(res.status).toBe(201);
+
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceStartTime: new Date('1970-01-01T08:00:00.000Z') },
+        });
+      });
+
+      test('Manager-recorded arrival succeeds under the identical Mogadishu-vs-UTC scenario', async () => {
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceStartTime: new Date('1970-01-01T15:00:00.000Z') },
+        });
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-tz-mgr-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const res = await request(app)
+          .post(`/api/v1/attendance/manager/staff/${teacher.account.id}/come`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        expect(res.status).toBe(201);
+
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceStartTime: new Date('1970-01-01T08:00:00.000Z') },
+        });
+      });
+
+      test('GET roster derives ABSENT using Mogadishu time — a cutoff that raw UTC comparison would say hasn\'t passed yet', async () => {
+        // Cutoff "15:00": naive UTC-literal comparison treats this as 15:00
+        // UTC, and real "now" (13:15 UTC) is before it — NOT_RECORDED under
+        // the bug. Correctly interpreted as 15:00 Mogadishu (= 12:00 UTC),
+        // real "now" (13:15 UTC) is already past it — ABSENT.
+        const neverComes = await directAccountToken(staffFx.schoolId, 'ACCOUNTANT', `staff-tz-absent-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceAbsenceCutoff: new Date('1970-01-01T15:00:00.000Z') },
+        });
+
+        const res = await request(app)
+          .get(`/api/v1/attendance/manager/staff?date=${FAKE_TODAY}`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`);
+        const entry = res.body.data.find((s) => s.accountId === neverComes.account.id);
+        expect(entry.status).toBe('ABSENT');
+        expect(entry.time).toBeNull();
+
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceAbsenceCutoff: new Date('1970-01-01T20:00:00.000Z') },
+        });
+      });
+
+      test('"Unexcuse" recomputes LATE (not PRESENT) from the original arrival\'s Mogadishu time, not its raw UTC time', async () => {
+        // Late threshold "14:00": the arrival's real UTC time-of-day is
+        // "13:15", which is <= "14:00" (the old bug would recompute
+        // PRESENT). Its Mogadishu time-of-day is "16:15", which is > "14:00"
+        // — the correct recompute is LATE.
+        const teacher = await directAccountToken(staffFx.schoolId, 'TEACHER', `staff-tz-unexcuse-${uniqueSuffix()}@example.com`, staffFx.actingUser);
+        const comeRes = await request(app).post('/api/v1/attendance/staff/me/come').set('Authorization', `Bearer ${teacher.token}`);
+        expect(comeRes.status).toBe(201);
+
+        const excuseRes = await request(app)
+          .patch(`/api/v1/attendance/manager/staff/${teacher.account.id}/excuse`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`)
+          .send({ date: FAKE_TODAY });
+        expect(excuseRes.status).toBe(200);
+
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceLateThreshold: new Date('1970-01-01T14:00:00.000Z') },
+        });
+
+        const unexcuseRes = await request(app)
+          .patch(`/api/v1/attendance/manager/staff/${teacher.account.id}/unexcuse`)
+          .set('Authorization', `Bearer ${staffFx.manager.token}`)
+          .send({ date: FAKE_TODAY });
+        expect(unexcuseRes.status).toBe(200);
+        expect(unexcuseRes.body.data.status).toBe('LATE');
+
+        await prisma.attendanceSettings.update({
+          where: { schoolId: staffFx.schoolId },
+          data: { staffAttendanceLateThreshold: new Date('1970-01-01T13:00:00.000Z') },
+        });
+      });
     });
 
     // --- Normal "Excuse" is today-only; historical correction is separate ---
@@ -996,17 +1252,24 @@ describe('Attendance Management', () => {
       expect(res.status).toBe(404);
     });
 
-    test('self "Come" always writes against the caller\'s own school, never a cross-school target — there is no accountId for a Manager to even attempt to target any more (v1.7)', async () => {
+    test('self "Come" and Manager-recorded arrival both stay within the caller\'s own school — self "Come" has no accountId to target at all (v1.7), and the Manager-recorded route (v2.0) rejects a cross-school target', async () => {
       const otherTeacherRecord = await prisma.teacher.findUnique({ where: { id: otherFx.teacher.id } });
       const otherTeacherAccount = await prisma.account.findUnique({ where: { id: otherTeacherRecord.accountId } });
 
-      // The old per-account route this scenario used to exercise is gone
-      // entirely (v1.7) — confirm it stays gone regardless of which school's
-      // account a caller tries against.
-      const removedRouteRes = await request(app)
+      // (v2.0) The Manager-recorded arrival route now exists again, but is
+      // scoped to the acting Manager's own school via
+      // listAccountsByRole(schoolId, [...]) — a School-A Manager targeting a
+      // School-B Teacher's accountId finds no match in their own school's
+      // list and is rejected the same way an invalid target already is
+      // (422), never a cross-school write.
+      const crossSchoolRes = await request(app)
         .post(`/api/v1/attendance/manager/staff/${otherTeacherRecord.accountId}/come`)
         .set('Authorization', `Bearer ${fx.manager.token}`);
-      expect(removedRouteRes.status).toBe(404);
+      expect(crossSchoolRes.status).toBe(422);
+      const crossSchoolRow = await prisma.staffAttendance.findUnique({
+        where: { staffAccountId_date: { staffAccountId: otherTeacherRecord.accountId, date: new Date(`${FAKE_TODAY}T00:00:00.000Z`) } },
+      });
+      expect(crossSchoolRow).toBeNull();
 
       // A School-B Teacher self-checking in writes only to School B — a
       // School-A Manager's own roster read never sees it.

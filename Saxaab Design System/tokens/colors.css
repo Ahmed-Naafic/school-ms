@@ -1,0 +1,61 @@
+:root {
+  /* ---- Base palette (sampled from the Saxaab logo) ---- */
+  --navy-950: #0d1f30;
+  --navy-900: #14304a;
+  --navy-800: #1b3a5c;   /* logo navy — primary brand color */
+  --navy-700: #24507c;
+  --navy-100: #dbe5ee;
+  --navy-50:  #eef3f7;
+
+  --teal-700: #1e807e;
+  --teal-600: #249a98;
+  --teal-500: #2ca6a4;   /* logo teal — accent */
+  --teal-100: #d9f0ef;
+  --teal-50:  #edf8f7;
+
+  --amber-600: #cf8b28;
+  --amber-500: #e9a23b;  /* logo amber — highlight, sparingly */
+  --amber-100: #fbeedb;
+
+  --gray-900: #23303c;
+  --gray-700: #47555f;
+  --gray-500: #7b8790;   /* tagline gray */
+  --gray-300: #c3ccd2;
+  --gray-200: #dde3e7;
+  --gray-100: #eef1f3;
+  --gray-50:  #f7f9fa;
+  --white:    #ffffff;
+
+  /* ---- Semantic ---- */
+  --success: #24906a;
+  --success-bg: #e2f3ec;
+  --warning: #cf8b28;
+  --warning-bg: #fbeedb;
+  --danger: #cf4444;
+  --danger-bg: #fae5e5;
+  --info: #24507c;
+  --info-bg: #eef3f7;
+
+  /* ---- Aliases ---- */
+  --brand-primary: var(--navy-800);
+  --brand-accent: var(--teal-500);
+  --brand-highlight: var(--amber-500);
+
+  --surface-page: var(--gray-50);
+  --surface-card: var(--white);
+  --surface-sunken: var(--gray-100);
+  --surface-inverse: var(--navy-900);
+
+  --text-heading: var(--navy-900);
+  --text-body: var(--gray-900);
+  --text-muted: var(--gray-500);
+  --text-inverse: #f2f6f9;
+  --text-on-accent: #ffffff;
+
+  --border-default: var(--gray-200);
+  --border-strong: var(--gray-300);
+  --focus-ring: var(--teal-500);
+
+  --link: var(--teal-600);
+  --link-hover: var(--teal-700);
+}

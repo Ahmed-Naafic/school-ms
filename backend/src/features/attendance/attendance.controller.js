@@ -107,6 +107,14 @@ const getManagerStaffAttendance = asyncHandler(async (req, res) => {
   return sendSuccess(res, { message: 'Staff attendance retrieved', data: view });
 });
 
+// (v2.0) Manager-recorded arrival for a specific Teacher/Accountant — the one
+// deliberate exception to "no client-suppliable target account" in this
+// feature's "Come" family; see attendance.service.js's own recordManagerStaffArrival.
+const recordManagerStaffArrival = asyncHandler(async (req, res) => {
+  const record = await service.recordManagerStaffArrival(req.user.schoolId, req.params.accountId, req.user);
+  return sendSuccess(res, { statusCode: 201, message: 'Arrival recorded', data: record });
+});
+
 const excuseManagerStaff = asyncHandler(async (req, res) => {
   validation.validateOptionalDateBody(req.body);
   const date = (req.body && req.body.date) || new Date().toISOString().slice(0, 10);
@@ -177,6 +185,7 @@ module.exports = {
   correctStudentAttendance,
   recordSelfArrival,
   getManagerStaffAttendance,
+  recordManagerStaffArrival,
   excuseManagerStaff,
   excuseManagerStaffHistorical,
   unexcuseManagerStaff,

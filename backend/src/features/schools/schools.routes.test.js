@@ -267,17 +267,13 @@ describe('Education Levels (ACR-003, Business Rule #17)', () => {
     expect(res.body.data.educationLevels.sort()).toEqual(['PRIMARY', 'SECONDARY']);
   });
 
-  it('rejects a submission that would remove a currently-held Education Level (regression)', async () => {
+  it('allows removing a currently-held Education Level with no in-use Subjects', async () => {
     // schoolA now has [PRIMARY, SECONDARY] from the previous test.
     const res = await request(app)
       .patch(`/api/v1/schools/${schoolA.schoolId}/education-levels`)
       .set('Authorization', `Bearer ${superAdminToken}`)
       .send({ educationLevels: ['SECONDARY'] });
-    expect(res.status).toBe(409);
-
-    const check = await request(app)
-      .get(`/api/v1/schools/${schoolA.schoolId}`)
-      .set('Authorization', `Bearer ${superAdminToken}`);
-    expect(check.body.data.educationLevels.sort()).toEqual(['PRIMARY', 'SECONDARY']);
+    expect(res.status).toBe(200);
+    expect(res.body.data.educationLevels).toEqual(['SECONDARY']);
   });
 });
