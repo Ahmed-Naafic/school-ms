@@ -10,6 +10,17 @@ const createSchool = asyncHandler(async (req, res) => {
   return sendSuccess(res, { statusCode: 201, message: 'School created', data: school });
 });
 
+const listSchools = asyncHandler(async (req, res) => {
+  const schools = await service.listSchools();
+  return sendSuccess(res, { message: 'Schools retrieved', data: schools });
+});
+
+const getSchoolById = asyncHandler(async (req, res) => {
+  const school = await service.getSchoolOrThrow(req.params.schoolId);
+  assertSameSchool(req.user, school.id);
+  return sendSuccess(res, { message: 'School retrieved', data: school });
+});
+
 const updateCoreIdentity = asyncHandler(async (req, res) => {
   validation.validateUpdateCoreIdentity(req.body);
   const school = await service.updateCoreIdentity(req.params.schoolId, req.body.name, req.user);
@@ -61,8 +72,16 @@ const getPlatformStatistics = asyncHandler(async (req, res) => {
   return sendSuccess(res, { message: 'Platform statistics retrieved', data: stats });
 });
 
+const updateEducationLevels = asyncHandler(async (req, res) => {
+  validation.validateUpdateEducationLevels(req.body);
+  const school = await service.updateEducationLevels(req.params.schoolId, req.body.educationLevels, req.user);
+  return sendSuccess(res, { message: 'Education Levels updated', data: school });
+});
+
 module.exports = {
   createSchool,
+  listSchools,
+  getSchoolById,
   updateCoreIdentity,
   updateOperationalProfile,
   suspendSchool,
@@ -70,5 +89,6 @@ module.exports = {
   closeSchool,
   reopenSchool,
   updateSubscriptionStatus,
+  updateEducationLevels,
   getPlatformStatistics,
 };

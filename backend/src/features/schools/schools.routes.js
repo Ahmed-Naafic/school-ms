@@ -14,7 +14,13 @@ router.use(requireCredentialsEstablished);
 
 router.post('/', requireRole('SUPER_ADMIN'), controller.createSchool);
 
+router.get('/', requireRole('SUPER_ADMIN'), controller.listSchools);
+
 router.get('/statistics', requireRole('SUPER_ADMIN'), controller.getPlatformStatistics);
+
+// School Admin may view their own school (enforced via assertSameSchool in
+// the controller); Super Admin may view any.
+router.get('/:schoolId', requireRole('SUPER_ADMIN', 'SCHOOL_ADMIN'), controller.getSchoolById);
 
 router.patch('/:schoolId/identity', requireRole('SUPER_ADMIN'), controller.updateCoreIdentity);
 
@@ -34,6 +40,11 @@ router.patch(
   '/:schoolId/subscription',
   requireRole('SUPER_ADMIN'),
   controller.updateSubscriptionStatus
+);
+router.patch(
+  '/:schoolId/education-levels',
+  requireRole('SUPER_ADMIN'),
+  controller.updateEducationLevels
 );
 
 module.exports = router;

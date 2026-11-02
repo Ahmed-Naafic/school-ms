@@ -38,6 +38,14 @@ router.post(
   controller.createAccount
 );
 
+router.get(
+  '/accounts',
+  authenticate,
+  requireCredentialsEstablished,
+  requireRole('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  controller.listAccounts
+);
+
 router.patch(
   '/accounts/:accountId/deactivate',
   authenticate,
@@ -68,6 +76,19 @@ router.patch(
   requireCredentialsEstablished,
   requireRole('SUPER_ADMIN', 'SCHOOL_ADMIN'),
   controller.changeRole
+);
+
+// Business Rules #29-30 (ACR-011): SCHOOL_ADMIN resets their own school's
+// Teacher/Manager/Accountant accounts. SUPER_ADMIN may reset School Admin
+// accounts only — it still gains no operational school-staff password-reset
+// authority. Service-layer scoping is the real authority boundary; this
+// route-level gate is the first line of defense.
+router.patch(
+  '/accounts/:accountId/reset-password',
+  authenticate,
+  requireCredentialsEstablished,
+  requireRole('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  controller.resetPasswordAdministratively
 );
 
 module.exports = router;

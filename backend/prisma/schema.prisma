@@ -16,6 +16,14 @@ enum UserRole {
   ACCOUNTANT
   TEACHER
   STUDENT
+  // Added by ACR-010 (docs/01-architecture/Architecture-Decision-Records/
+  // ACR-010-Manager-Role-Introduction.md): a distinct, first-class role,
+  // tenant-scoped to exactly one school, created/deactivated/reactivated
+  // only by SCHOOL_ADMIN. No profile model of its own — mirrors the
+  // Accountant precedent (Account.role alone identifies it), since Manager
+  // has no employment-lifecycle data of its own in this version. Substantive
+  // permissions are entirely attendance-specific, per Attendance-Management.md.
+  MANAGER
 }
 
 // Lifecycle status of an Account, per Authentication-and-Authorization.md.
@@ -43,11 +51,20 @@ enum SubscriptionStatus {
   EXPIRED
 }
 
+// (ACR-003) A school's curriculum education levels, per School-Management.md
+// Business Rule #17. Deliberately a small, fixed, platform-wide enum, not a
+// managed reference list — adding a third level is a schema change, not data
+// entry, per "Avoid Premature Abstraction."
+enum EducationLevel {
+  PRIMARY
+  SECONDARY
+}
+
 model School {
-  id     String @id @default(uuid())
+  id String @id @default(uuid())
 
   // Core identifying information — Super Admin only (Business Rule #14).
-  name   String @unique
+  name String @unique
 
   // Operational profile information — School Admin editable (Business Rule #14).
   contactEmail String?
@@ -57,7 +74,58 @@ model School {
   lifecycleStatus    SchoolLifecycleStatus @default(ACTIVE)
   subscriptionStatus SubscriptionStatus    @default(TRIAL)
 
+  // (ACR-003) Core structural information — Super Admin only, same category as
+  // `name`. Never empty; only ever grows (no supported removal path yet, per
+  // Business Rule #17). Defaults to [PRIMARY] — existing rows are backfilled
+  // to this same value by the migration.
+  educationLevels EducationLevel[] @default([PRIMARY])
+
   accounts Account[]
+  classes  Class[]
+  students Student[]
+  teachers Teacher[]
+
+  // (Subject Management) Tenant-scoped Subject assignments — see SchoolSubject.
+  subjectAssignments SchoolSubject[]
+
+  // (Academic Year Management) This school's own Academic Years.
+  academicYears AcademicYear[]
+
+  // (Teacher Subject Assignment) This school's own teaching assignments.
+  teacherSubjectAssignments TeacherSubjectAssignment[]
+
+  // (Timetable Management) This school's own Lessons.
+  lessons Lesson[]
+
+  // (Timetable Management, Architecture Update — Generation-First) This
+  // school's own Draft/Published/Archived Timetable versions.
+  timetableVersions TimetableVersion[]
+
+  // (Timetable Management) Exactly one per school, created together with
+  // the school itself — see SchoolOptimizationSettings' own comment.
+  optimizationSettings SchoolOptimizationSettings?
+
+  // (School Schedule Management) Exactly one per school, created together
+  // with the school itself — see SchoolCalendar's own comment. Optional here
+  // only because Prisma requires the non-FK side of a 1:1 relation to be
+  // nullable; every school is expected to have one from the moment it exists.
+  schoolCalendar SchoolCalendar?
+
+  // (School Schedule Management) This school's own Shifts.
+  shifts Shift[]
+
+  // (ACR-009, Architecture Update — Grade/Form) This school's own Grade/Form
+  // groupings, owned by Class Management.
+  gradeLevels GradeLevel[]
+
+  // (Weekly Subject Allocation) This school's own allocations.
+  weeklySubjectAllocations WeeklySubjectAllocation[]
+
+  // (Attendance Management) This school's own one-off non-working dates, and
+  // its exactly-one-per-school configurable attendance time-window settings —
+  // same "exactly one, optional-for-1:1" shape as optimizationSettings/schoolCalendar above.
+  schoolNonWorkingDays SchoolNonWorkingDay[]
+  attendanceSettings   AttendanceSettings?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -65,8 +133,364 @@ model School {
   @@map("schools")
 }
 
+// A weekday, per School-Schedule-Management.md. Only Working Days are ever
+// stored (on SchoolCalendar.workingDays) — Weekend Days are always the
+// derived complement against this full 7-value set, never stored
+// themselves, per Business Rule #4's "never both, never neither" invariant
+// being structurally guaranteed by this representation choice.
+enum DayOfWeek {
+  SUNDAY
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+}
+
+// A school's own current Working Day / Weekend Day configuration, per
+// School-Schedule-Management.md Business Rule #2. Deliberately NOT a
+// historical/versioned entity (Business Rule #6) — exactly one row per
+// school, ever; created once (together with the school itself) and only
+// ever updated in place afterward, never superseded by a new row. `onDelete:
+// Cascade` is a narrow, deliberate exception to this project's usual
+// RESTRICT convention: a School is never hard-deleted through ordinary
+// operation (Suspend/Close/Reopen are its real terminal states, per
+// Archive Before Delete), so this Cascade only ever fires during School &
+// Platform Management's own compensating rollback of an incomplete school
+// creation — see schools.service.js's createSchool.
+model SchoolCalendar {
+  id String @id @default(uuid())
+
+  schoolId String @unique
+  school   School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  workingDays DayOfWeek[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("school_calendars")
+}
+
+// Lifecycle status of a Shift, per School-Schedule-Management.md. Same
+// naming convention as ClassStatus/SubjectStatus/AcademicYearStatus (ACTIVE
+// / ARCHIVED).
+enum ShiftStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// A school's own named, time-bounded daily teaching period, per
+// School-Schedule-Management.md. Shift names are entirely configurable —
+// "Morning"/"Afternoon" are illustrative examples, never hardcoded values,
+// except as the one automatically-created default Shift's own *initial*
+// name (Business Rule #7), freely renamable afterward like any other Shift.
+model Shift {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  name String
+
+  // Native Postgres TIME (no time zone) — a Shift's hours are the same
+  // wall-clock times every day they apply to. New to this project (no prior
+  // feature has stored a time-of-day-only value); chosen over a string so
+  // Postgres itself guarantees a valid, comparable value, per Decision-
+  // Making-Principles' Protect Data.
+  startTime DateTime @db.Time()
+  endTime   DateTime @db.Time()
+
+  // Null exactly when status = ARCHIVED (Business Rule #14) — an Archived
+  // Shift holds no position in the active ordering at all, a deliberate
+  // divergence from Class.sequenceOrder (which keeps archived Classes in
+  // its own sequence, appended after actives). Postgres's ordinary
+  // NULL-distinct default already makes two archived Shifts (both NULL)
+  // never collide under the unique constraint below — no NULLS NOT
+  // DISTINCT needed, unlike Teacher Subject Assignment's own partial index.
+  displayOrder Int?
+
+  // Exactly one Shift per school may hold this flag, and only while Active
+  // (Business Rules #8, #10), enforced by a partial unique index added via
+  // raw SQL in this model's migration — the same justified exception
+  // Class.isFinal's and AcademicYear.isCurrent's own migrations already
+  // established, since Prisma's schema DSL cannot express a partial unique
+  // constraint directly.
+  isDefault Boolean @default(false)
+
+  status ShiftStatus @default(ACTIVE)
+
+  // (Class Management) Read-only from this feature's own perspective —
+  // School Schedule Management never queries this back-relation itself; it
+  // exists only so Prisma can express Class.shiftId's foreign key.
+  classes Class[]
+
+  periods Period[]
+
+  // (Timetable Management) Read-only from this feature's own perspective —
+  // exists only so Prisma can express TeacherSchedulePreference.preferredShiftId's
+  // own foreign key.
+  preferredByTeachers TeacherSchedulePreference[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, displayOrder])
+  @@index([schoolId])
+  @@map("shifts")
+}
+
+// Whether a Period is instructional time or a break, per
+// School-Schedule-Management.md's Architecture Update (Periods). Only two
+// values in v1 — Assembly/Lunch/Prayer/Activity etc. are future enhancements.
+enum PeriodType {
+  TEACHING
+  BREAK
+}
+
+// Lifecycle status of a Period. Kept distinct from ShiftStatus (one status
+// enum per owning entity, the same reasoning ShiftStatus itself was kept
+// distinct from ClassStatus/SubjectStatus/AcademicYearStatus).
+enum PeriodStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// A Shift's own ordered sub-division, per School-Schedule-Management.md's
+// Architecture Update (Periods) — Business Rule #23: a Period cannot exist
+// without a Shift, and belongs to exactly one. No schoolId column: tenant
+// isolation is resolved via the parent Shift, the same "no denormalized
+// tenant column on a child-of-a-child entity" pattern Class Management's own
+// Section already established relative to Class.
+model Period {
+  id String @id @default(uuid())
+
+  shiftId String
+  // onDelete: Cascade — unlike Class.shiftId (which is safe as the default
+  // RESTRICT, since no Class exists yet at compensating-rollback time),
+  // Period rows for a school's default Shift are created in the very same
+  // createDefaultScheduleForSchool bootstrap flow. If a later step in that
+  // same school-creation attempt fails and schools.service.js's compensating
+  // rollback hard-deletes the School row, that delete cascades through
+  // SchoolCalendar and Shift (both already Cascade) — Period must cascade
+  // too, or the Shift's own cascade-delete would be blocked by Period's FK,
+  // failing the rollback itself.
+  shift   Shift  @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+
+  name String
+  type PeriodType
+
+  // Nullable — a genuinely new "structurally valid but not yet configured"
+  // record shape for this project. Both the bootstrap default structure and
+  // the setup-wizard's generated structure create Period rows before any
+  // real time value is known (Business Rule #25, Validation Rules #13-14).
+  startTime DateTime? @db.Time()
+  endTime   DateTime? @db.Time()
+
+  // Null exactly when status = ARCHIVED, the same convention Shift.displayOrder
+  // already established one level up. Scoped to shiftId, not schoolId (Business
+  // Rule #26) — two Periods in different Shifts may both be displayOrder 1.
+  displayOrder Int?
+
+  status PeriodStatus @default(ACTIVE)
+
+  // (Timetable Management) Read-only from this feature's own perspective —
+  // School Schedule Management never queries this back-relation itself; it
+  // exists only so Prisma can express Lesson.periodId's own foreign key.
+  lessons Lesson[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shiftId, displayOrder])
+  @@index([shiftId])
+  @@map("periods")
+}
+
+// Lifecycle status of a Class or Section, per Class-Management.md.
+// Archiving blocks new Enrollment only — it never affects Students already
+// enrolled and never deletes the record (Business Rule #9).
+enum ClassStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum GradeLevelStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// (ACR-009, Architecture Update — Grade/Form) A school's own named grouping
+// of Classes sharing the same year level ("Grade 8" groups G8A-D). Owned by
+// Class Management — the same shape as School Schedule Management's own
+// Shift (school-scoped, named, orderable, archivable), but one level above
+// Class rather than beside it. Driven by Weekly Subject Allocation's own
+// Business Review, which needs a reliable way to group Classes for its own
+// per-Grade/Form allocation; this entity does not itself know about that
+// feature. No shiftId is stored here — every member Class's own shiftId is
+// guaranteed identical by the Business Rule enforced in classes.service.js
+// (assertSameShiftWithinGradeLevel), so a GradeLevel's effective Shift is
+// always derived, never a second stored source of truth.
+model GradeLevel {
+  id String @id @default(uuid())
+
+  schoolId String
+  // onDelete: Cascade — every new school's own placeholder "Ungrouped"
+  // GradeLevel is created inside the same at-risk school-creation window as
+  // SchoolCalendar/Shift/Period/SchoolOptimizationSettings (before the first
+  // School Admin account is guaranteed to exist), so School & Platform
+  // Management's own compensating rollback must be able to cascade through
+  // this row too, the same reasoning already established for those models.
+  school   School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  // Unique within a school, not platform-wide. Free text — "Grade 8",
+  // "Form 1" — never a fixed platform enum, since naming conventions vary
+  // by school, the same reasoning Shift.name already established.
+  name String
+
+  // Display ordering — a real, maintained contiguous 1..N sequence, unique
+  // within the school. Archived rows keep their position (appended after
+  // actives), mirroring Class.sequenceOrder's own convention exactly, not
+  // Shift.displayOrder's alternate "archived holds no position" convention
+  // (Technical Design Review's own third finding for this addition).
+  sequenceOrder Int
+
+  status GradeLevelStatus @default(ACTIVE)
+
+  // Which curriculum Education Level this Grade/Form belongs to — required
+  // so Weekly Subject Allocation can scope its own eligible-Subjects list
+  // correctly (Primary Grade/Forms only ever see Primary Subjects, and vice
+  // versa). A real, explicit field chosen by the School Admin at creation
+  // time — never inferred from the Grade/Form's own free-text name (e.g.
+  // guessing "Grade" = Primary, "Form" = Secondary), which would repeat the
+  // exact "name-based inference is fragile" mistake this project already
+  // rejected once for the Grade/Form grouping concept itself (ACR-009,
+  // Option C). Correctable afterward via updateGradeLevel — no downstream
+  // invariant depends on it staying fixed once set.
+  educationLevel EducationLevel
+
+  classes Class[]
+
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @updatedAt
+  weeklySubjectAllocations WeeklySubjectAllocation[]
+
+  @@unique([schoolId, name])
+  @@unique([schoolId, sequenceOrder])
+  @@index([schoolId])
+  @@map("grade_levels")
+}
+
+// A Class is a single, evergreen record reused across academic years — never
+// recreated per year (Business Rule #5). The academic year a Student is
+// enrolled for lives entirely on Student Management's Enrollment record, not
+// here.
+model Class {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  // Unique within a school, not platform-wide (Business Rule #3).
+  name String
+
+  // Defines this school's Class order (Business Rule #6). Suggests, but never
+  // enforces, "the next Class" for Student Management's Promotion. Reassigned
+  // as a contiguous 1..N sequence within the school on every reorder, inside a
+  // single transaction, per the Technical Design's Risks section.
+  sequenceOrder Int
+
+  // Exactly one Class per school may hold this flag (Business Rule #7),
+  // additionally enforced by a partial unique index added via raw SQL in this
+  // model's migration, since Prisma's schema DSL cannot express a partial
+  // unique constraint directly.
+  isFinal Boolean @default(false)
+
+  status ClassStatus @default(ACTIVE)
+
+  // (School Schedule Management) Every Class references exactly one active
+  // Shift (Business Rule #13 there) — a required, additive dependency on
+  // that feature, added after Class Management's own Feature Acceptance,
+  // the same category of post-Acceptance change already made for Teacher
+  // Management's getTeacherById. Validity (belongs to school, is Active) is
+  // checked in the service layer via schoolScheduleService.validateShift,
+  // never enforced here at the schema level, the same split classId's own
+  // validity already follows in every other feature that references it.
+  // Existing Classes were backfilled to their own school's Default Shift by
+  // this column's own migration.
+  shiftId String
+  shift   Shift  @relation(fields: [shiftId], references: [id])
+
+  // (ACR-009, Architecture Update — Grade/Form) Every Class belongs to
+  // exactly one GradeLevel — a required, additive dependency owned by this
+  // same feature (unlike shiftId above, whose owning entity belongs to a
+  // different feature). Every Class within one GradeLevel must share the
+  // same shiftId, enforced in classes.service.js, never at the schema
+  // level (it spans two columns across a self-referencing set of sibling
+  // rows, which Postgres cannot express as a simple constraint). Existing
+  // Classes were backfilled to a placeholder "Ungrouped" GradeLevel per
+  // school by this column's own migration.
+  gradeLevelId String
+  gradeLevel   GradeLevel @relation(fields: [gradeLevelId], references: [id])
+
+  sections    Section[]
+  enrollments Enrollment[]
+
+  // (Teacher Subject Assignment) Read-only from this feature's own
+  // perspective — Class Management never queries this back-relation itself.
+  teacherSubjectAssignments TeacherSubjectAssignment[]
+
+  // (Timetable Management) Same as teacherSubjectAssignments above — exists
+  // only so Prisma can express Lesson.classId's own foreign key.
+  lessons Lesson[]
+
+  // (Attendance Management) Same reasoning — exists only so Prisma can
+  // express StudentAttendance.classId's own foreign key (needed directly,
+  // not just via lessonId, since Manager-checkpoint rows have no Lesson).
+  studentAttendanceRecords StudentAttendance[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, name])
+  @@unique([schoolId, sequenceOrder])
+  @@index([schoolId])
+  @@index([schoolId, shiftId])
+  @@index([gradeLevelId])
+  @@map("classes")
+}
+
+// A Section always belongs to exactly one Class (Business Rule #4).
+model Section {
+  id String @id @default(uuid())
+
+  classId String
+  class   Class  @relation(fields: [classId], references: [id])
+
+  // Unique within its Class, not platform-wide.
+  name String
+
+  status ClassStatus @default(ACTIVE)
+
+  // (ACR-002) Read-only from this feature's own perspective — Class
+  // Management never queries this back-relation itself; it exists only so
+  // Prisma can express Enrollment.sectionId's foreign key.
+  enrollments Enrollment[]
+
+  // (Teacher Subject Assignment) Same as enrollments above — exists only so
+  // Prisma can express TeacherSubjectAssignment.sectionId's foreign key.
+  teacherSubjectAssignments TeacherSubjectAssignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([classId, name])
+  @@map("sections")
+}
+
 model Account {
-  id     String @id @default(uuid())
+  id String @id @default(uuid())
 
   // Platform-wide unique login identifier and verified recovery contact
   // (Business Rules #21). One field serves both purposes.
@@ -79,6 +503,16 @@ model Account {
   role   UserRole
   status AccountStatus @default(ACTIVE)
 
+  // True only while the account's current DEACTIVATED status came from
+  // Authentication & Authorization's own administrative/security override
+  // (ACR-001, Business Rule #25), not from an owning feature's ordinary
+  // employment/enrollment-lifecycle sync. Cleared whenever the account is
+  // reactivated through any path. Exists so an owning feature's own routine
+  // reactivating transition (e.g. Teacher Management's Return from
+  // Leave/Rehire) can refuse to silently undo a deliberate, reason-recorded
+  // security lockdown — Phase 9 code review (Teacher Management) finding.
+  deactivatedByOverride Boolean @default(false)
+
   // Nullable only for Super Admin (Business Rule #2 / Authentication Business Rule #2).
   schoolId String?
   school   School? @relation(fields: [schoolId], references: [id])
@@ -88,6 +522,19 @@ model Account {
   lockedUntil         DateTime?
 
   refreshTokens RefreshToken[]
+  student       Student?
+  teacher       Teacher?
+
+  // (Attendance Management) Back-relations only — Attendance never queries
+  // these from the Account side; they exist purely so Prisma can express
+  // StudentAttendance's/StaffAttendance's own foreign keys. Distinctly named
+  // because an Account can be the subject, the recorder, or the corrector of
+  // either table, all separately.
+  studentAttendanceRecorded  StudentAttendance[] @relation("StudentAttendanceRecordedBy")
+  studentAttendanceCorrected StudentAttendance[] @relation("StudentAttendanceCorrectedBy")
+  staffAttendanceAsSubject   StaffAttendance[]   @relation("StaffAttendanceSubject")
+  staffAttendanceRecorded    StaffAttendance[]   @relation("StaffAttendanceRecordedBy")
+  staffAttendanceCorrected   StaffAttendance[]   @relation("StaffAttendanceCorrectedBy")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -98,8 +545,8 @@ model Account {
 // Server-tracked by reference so a specific refresh token can be individually
 // revoked (logout, deactivation, lockout, role change) per Security-Standards.md.
 model RefreshToken {
-  id        String   @id @default(uuid())
-  tokenHash String   @unique
+  id        String @id @default(uuid())
+  tokenHash String @unique
 
   accountId String
   account   Account @relation(fields: [accountId], references: [id])
@@ -116,8 +563,8 @@ model RefreshToken {
 // flow for accounts created in MUST_CHANGE_CREDENTIALS status — both reuse
 // this same mechanism rather than inventing a separate invitation system.
 model PasswordResetToken {
-  id        String    @id @default(uuid())
-  tokenHash String    @unique
+  id        String @id @default(uuid())
+  tokenHash String @unique
 
   accountId String
 
@@ -127,6 +574,967 @@ model PasswordResetToken {
   createdAt DateTime @default(now())
 
   @@map("password_reset_tokens")
+}
+
+// Student lifecycle status, per Student-Management.md.
+// ELIGIBLE_FOR_GRADUATION is a one-way transition written once, at the point
+// of Promotion into the school's final Class — it is never re-derived or
+// revoked by a later change to which Class is designated final (Business
+// Rule #10). Graduation is only reachable from this state, never directly
+// from ACTIVE (Product Owner's Graduation-guard decision).
+enum StudentStatus {
+  ACTIVE
+  ELIGIBLE_FOR_GRADUATION
+  TRANSFERRED
+  WITHDRAWN
+  GRADUATED
+}
+
+// A Student belongs to exactly one school (Business Rule #2) and has exactly
+// one login Account, created via Authentication & Authorization's existing
+// account-creation service at Admission — this model never duplicates
+// credential data, only references the Account that owns it.
+model Student {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  accountId String  @unique
+  account   Account @relation(fields: [accountId], references: [id])
+
+  fullName      String
+  parentName    String?
+  parentContact String?
+
+  status StudentStatus @default(ACTIVE)
+
+  enrollments Enrollment[]
+
+  // (Attendance Management) Back-relation only, per Business Rule #29 — no
+  // cascade delete; a Student's attendance history survives every lifecycle
+  // transition unchanged.
+  attendanceRecords StudentAttendance[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId])
+  @@index([schoolId, status])
+  @@map("students")
+}
+
+// One Enrollment record per academic year per Student — Promotion always
+// creates a new record rather than mutating the prior one, so Enrollment
+// history is preserved (Business Rule #5). The Student's current Class is
+// derived by querying the most recent Enrollment, not duplicated onto the
+// Student record.
+model Enrollment {
+  id String @id @default(uuid())
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id])
+
+  // References Class Management's Class directly for referential integrity,
+  // per Database-Standards.md — the service layer never queries this
+  // relation directly, though; it only ever reaches Class data through
+  // Class Management's own narrow service interface (getClassById, etc.),
+  // per the Technical Design's Loose Coupling reasoning.
+  classId String
+  class   Class  @relation(fields: [classId], references: [id])
+
+  // (ACR-002) Nullable — set only when the Class is organized into active
+  // Sections (Student-Management.md Business Rule #18). Validated against
+  // classId in the service layer (assertSectionEnrollable), never enforced
+  // here at the database layer, matching how classId's own tenant/status
+  // validity is already enforced in the service layer, not the schema.
+  sectionId String?
+  section   Section? @relation(fields: [sectionId], references: [id])
+
+  // Legacy free-text value. Kept, unmodified and unmigrated, for every
+  // Enrollment row created before ACR-004 — this feature never backfills or
+  // rewrites it. New Enrollment/Promotion no longer write to this field
+  // (nullable so new rows can leave it unset, without altering any
+  // pre-existing row's own non-null value).
+  academicYear String?
+
+  // (ACR-004) Nullable — required by service-layer business logic for every
+  // new Enrollment/Promotion (Student-Management.md Business Rules #21-22),
+  // but nullable at the schema level since it is not backfilled onto
+  // pre-ACR-004 rows. Validated against schoolId/Archived status in the
+  // service layer (assertAcademicYearEnrollable), never enforced here at
+  // the database layer, mirroring how sectionId's own validity is enforced
+  // in the service layer, not the schema.
+  academicYearId  String?
+  academicYearRef AcademicYear? @relation(fields: [academicYearId], references: [id])
+
+  // Only ever set on the outgoing Enrollment record at the point of
+  // Transfer — a Withdrawal never sets this (Business Rules #8, #9).
+  transferSummary String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([studentId])
+  @@map("enrollments")
+}
+
+// Teacher employment lifecycle, per Teacher-Management.md. Distinct from
+// Account.status (Authentication & Authorization's own field) — the two are
+// related only through the one-directional synchronization this feature's
+// service layer performs at each transition (Business Rule #5, ACR-001).
+// TERMINATED and RETIRED are permanent within this feature (Business Rule #6).
+enum TeacherEmploymentStatus {
+  ACTIVE
+  ON_LEAVE
+  RESIGNED
+  TERMINATED
+  RETIRED
+}
+
+// A Teacher belongs to exactly one school (Business Rule #2) and has exactly
+// one login Account, created via Authentication & Authorization's existing
+// account-creation service at Onboarding — this model never duplicates
+// credential data, only references the Account that owns it.
+model Teacher {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  accountId String  @unique
+  account   Account @relation(fields: [accountId], references: [id])
+
+  // System-generated at Onboarding, immutable thereafter, unique within the
+  // school rather than platform-wide (Business Rule #8). Never accepted on
+  // any update operation — enforced by the update DTO's shape, not only a
+  // runtime check.
+  employeeId String
+
+  fullName String
+
+  // The only fields a Teacher may edit on their own profile via PATCH
+  // /teachers/me (Business Rule #10); School Admin may also edit these plus
+  // every other field below via PATCH /teachers/{id}.
+  contactPhone   String?
+  contactAddress String?
+
+  joiningDate    DateTime
+  employmentType String?
+
+  qualifications         String?
+  subjectSpecializations String[] @default([])
+  relevantExperience     String?
+
+  // Owned entirely by this feature, distinct from Account.status — see the
+  // enum comment above. Defaults to ACTIVE at Onboarding.
+  employmentStatus TeacherEmploymentStatus @default(ACTIVE)
+
+  // (Teacher Subject Assignment) Read-only from this feature's own
+  // perspective — Teacher Management never queries this back-relation itself.
+  teacherSubjectAssignments TeacherSubjectAssignment[]
+
+  // (Timetable Management) Same as teacherSubjectAssignments above — exists
+  // only so Prisma can express Lesson.teacherId's own foreign key.
+  lessons Lesson[]
+
+  // (Timetable Management) Exactly one per Teacher, created lazily on first
+  // use — see TeacherSchedulePreference's own comment.
+  schedulePreference TeacherSchedulePreference?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, employeeId])
+  @@index([schoolId])
+  @@index([schoolId, employmentStatus])
+  @@map("teachers")
+}
+
+// Subject lifecycle status, per Subject-Management.md. Archiving blocks new
+// School assignment only — it never removes an existing assignment and never
+// deletes the record (Business Rules #4, #5). Same naming convention as
+// ClassStatus (ACTIVE / ARCHIVED).
+enum SubjectStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// Subject is a platform-wide catalog entity, owned by no single school —
+// unlike every other domain entity in this schema (Business Rule #12). Only
+// its assignment to a School (SchoolSubject, below) is tenant-scoped. A
+// Subject's educationLevel is editable only while it has zero School
+// assignments (Business Rule #2) — enforced in the service layer, not here.
+model Subject {
+  id String @id @default(uuid())
+
+  name           String
+  // Reuses the existing EducationLevel enum (ACR-003) — not redefined here.
+  educationLevel EducationLevel
+
+  status SubjectStatus @default(ACTIVE)
+
+  schoolAssignments SchoolSubject[]
+
+  // (Teacher Subject Assignment) References this catalog entity directly,
+  // never through SchoolSubject — see that model's own comment.
+  teacherSubjectAssignments TeacherSubjectAssignment[]
+
+  // (Weekly Subject Allocation) Same as above — exists only so Prisma can
+  // express WeeklySubjectAllocationSubject.subjectId's own foreign key.
+  weeklySubjectAllocationSubjects WeeklySubjectAllocationSubject[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Scoped per Education Level, not platform-wide (Business Rule #3) — e.g.
+  // "English" (Primary) and "English" (Secondary) are two distinct rows.
+  @@unique([name, educationLevel])
+  @@map("subjects")
+}
+
+// Tenant-scoped assignment of a Subject to a School (Business Rule #6,
+// ACR-003). Soft-removed, never hard-deleted (removedAt/removedById) —
+// re-assigning a previously-removed Subject reactivates the same row rather
+// than inserting a second one for the same (schoolId, subjectId) pair, per
+// the Technical Design's Database Impact reasoning. "Currently assigned"
+// means removedAt IS NULL; every read path filters on this.
+model SchoolSubject {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id])
+
+  assignedAt   DateTime @default(now())
+  assignedById String
+
+  removedAt   DateTime?
+  removedById String?
+
+  @@unique([schoolId, subjectId])
+  @@index([schoolId])
+  @@index([subjectId])
+  @@map("school_subjects")
+}
+
+// Academic Year lifecycle status, per Academic-Year-Management.md. Same
+// naming convention as ClassStatus/SubjectStatus (ACTIVE / ARCHIVED).
+enum AcademicYearStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// A school's own defined period of operation (Business Rule #2 — school-
+// scoped, not platform-wide). No name/label column: the human-readable
+// "YYYY/YYYY" label is a presentation concern only, derived from
+// startDate/endDate wherever it's needed, per the Technical Design's
+// explicit Requirement #5 — never stored.
+model AcademicYear {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  startDate DateTime
+  endDate   DateTime
+
+  status AcademicYearStatus @default(ACTIVE)
+
+  // Exactly one Academic Year per school may hold this flag once the school
+  // has any (Business Rule #9), enforced by the same two-layer pattern
+  // Class.isFinal already established: application-level atomicity
+  // (setCurrentAcademicYear, the sole writer of this field) as the primary
+  // mechanism, and a partial unique index (see this model's own migration —
+  // Prisma's schema DSL cannot express a partial unique constraint directly)
+  // as a backstop against a bypass or a bug.
+  isCurrent Boolean @default(false)
+
+  // (ACR-004) Read-only from this feature's own perspective — Academic Year
+  // Management never queries this back-relation itself; it exists only so
+  // Prisma can express Enrollment.academicYearId's foreign key.
+  enrollments Enrollment[]
+
+  // (Teacher Subject Assignment) Same as enrollments above — exists only so
+  // Prisma can express TeacherSubjectAssignment.academicYearId's foreign key.
+  teacherSubjectAssignments TeacherSubjectAssignment[]
+
+  // (Timetable Management) Same as above — exists only so Prisma can express
+  // Lesson.academicYearId's own foreign key.
+  lessons Lesson[]
+
+  // (Weekly Subject Allocation) Same as above — exists only so Prisma can
+  // express WeeklySubjectAllocation.academicYearId's own foreign key.
+  weeklySubjectAllocations WeeklySubjectAllocation[]
+
+  // (Timetable Management, Architecture Update — Generation-First) Same as
+  // above — exists only so Prisma can express TimetableVersion.academicYearId's
+  // own foreign key.
+  timetableVersions TimetableVersion[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId])
+  @@map("academic_years")
+}
+
+// Connects an ACTIVE Teacher to a Subject for a Class (and, optionally, a
+// Section within it) during a specific Academic Year, per
+// Teacher-Subject-Assignment.md. No `status` column — Active/Ended is always
+// derived from effectiveEndDate (null = Active), per the Technical Design's
+// Architecture section, mirroring Academic Year Management's own "no stored
+// derived label" judgment call for its own YYYY/YYYY label.
+//
+// Business Rule #4's "exactly one Active assignment per School + Academic
+// Year + Class + Section (or its absence) + Subject" invariant is enforced
+// two ways, per the Technical Design: primarily, a per-school Postgres
+// advisory lock guarding a check-then-act sequence inside every write
+// transaction; as a backstop, a partial, `NULLS NOT DISTINCT` unique index
+// added via hand-written raw SQL in this model's own migration, since
+// Prisma's schema DSL cannot express either a partial unique index or
+// NULLS NOT DISTINCT — the same justified exception Class.isFinal's and
+// AcademicYear.isCurrent's own migrations already established.
+model TeacherSubjectAssignment {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id])
+
+  // References Subject Management's platform-wide catalog entity directly,
+  // never through SchoolSubject — whether the Subject is currently assigned
+  // to this school is checked at write time via isSubjectAssignedToSchool
+  // (Business Rule #14), never modeled as a stored join reference, since a
+  // SchoolSubject assignment can be removed and reassigned independently of
+  // this historical record.
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id])
+
+  classId String
+  class   Class  @relation(fields: [classId], references: [id])
+
+  // Nullable — required when the Class has one or more active Sections, and
+  // must be absent when it has none (Business Rule #23), enforced by the
+  // service layer's assertClassSectionAssignable, not here.
+  sectionId String?
+  section   Section? @relation(fields: [sectionId], references: [id])
+
+  effectiveStartDate DateTime
+  // Null = Active, set = Ended (Business Rule #10). Once set, may never be
+  // cleared back to null (Business Rule #24) — enforced by the service
+  // layer's correction handling, not here.
+  effectiveEndDate   DateTime?
+  endReason          String?
+
+  // (Timetable Management) Read-only from this feature's own perspective —
+  // Teacher Subject Assignment never queries this back-relation itself.
+  lessons Lesson[]
+
+  // (Timetable Management) Same as lessons above — exists only so Prisma can
+  // express SubjectSchedulePreference.teacherSubjectAssignmentId's own FK.
+  schedulePreference SubjectSchedulePreference?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId])
+  @@index([schoolId, academicYearId])
+  @@index([teacherId])
+  @@map("teacher_subject_assignments")
+}
+
+// Lifecycle status of a Lesson, per Timetable.md. Cancelling (archiving) a
+// Lesson removes it from every live Timetable view but never deletes the
+// record — Archive Before Delete, the same convention every other entity in
+// this project already follows.
+enum LessonStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// Architecture Update (Generation-First): a school's own working copy of its
+// Timetable for one Academic Year. Exactly one DRAFT and exactly one
+// PUBLISHED version may exist per (schoolId, academicYearId) at a time
+// (partial unique indexes, see migration); any number of ARCHIVED versions
+// accumulate as history. The generation engine and every manual edit write
+// into the current DRAFT; Publish snapshots DRAFT -> PUBLISHED and demotes
+// the previous PUBLISHED to ARCHIVED. See Timetable.md's own Architecture
+// section (Generation-First Architecture Update) for the full reasoning.
+enum TimetableVersionStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model TimetableVersion {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  status TimetableVersionStatus @default(DRAFT)
+
+  publishedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lessons        Lesson[]
+  generationJobs TimetableGenerationJob[]
+
+  @@index([schoolId, academicYearId])
+  @@map("timetable_versions")
+}
+
+// Architecture Update (Generation-First): two ordinary Lesson rows placed
+// back-to-back for the same Teacher Subject Assignment, linked as one
+// logical double-period teaching session — never a single Lesson spanning
+// two Periods (preserves the existing one-lesson-per-period data model, so
+// Attendance and other future per-Period features keep working on individual
+// Lesson rows unmodified). Move/swap/lock/unlock/delete treat the group as
+// one unit at the service layer; Split is a deliberate, audited admin
+// override that breaks the group into two independent Lessons.
+model LessonGroup {
+  id String @id @default(uuid())
+
+  schoolId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lessons Lesson[]
+
+  @@index([schoolId])
+  @@map("lesson_groups")
+}
+
+// Architecture Update (Generation-First): tracks one run of the timetable
+// generation engine as a background job, since a real school's generation
+// (many Classes x Periods x constraints) is not guaranteed to finish inside
+// a single HTTP request. No queue/worker infrastructure exists anywhere in
+// this project yet — this is deliberately the simplest mechanism that fits
+// the current single-process architecture (an in-process async task backed
+// by this DB-persisted status row for polling), not a new piece of
+// infrastructure, and is flagged as Accepted Technical Debt in Timetable.md's
+// own Risks section: a process crash mid-run leaves a job stuck at RUNNING
+// with no automatic recovery.
+enum TimetableGenerationJobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model TimetableGenerationJob {
+  id String @id @default(uuid())
+
+  schoolId       String
+  academicYearId String
+
+  // Set once the job resolves (or creates) the Draft version it is writing
+  // into — null only in the brief QUEUED window before that resolution runs.
+  timetableVersionId String?
+  timetableVersion   TimetableVersion? @relation(fields: [timetableVersionId], references: [id])
+
+  status TimetableGenerationJobStatus @default(QUEUED)
+
+  // { type: 'ALL' | 'CLASS' | 'TEACHER' | 'DAY', classId?, teacherId?, dayOfWeek? }
+  // — a plain Json column, not a set of nullable scalar columns, since scope
+  // shape genuinely varies by type and is never queried by its own fields,
+  // only read back whole (the same reasoning already applied to
+  // TeacherSchedulePreference's own preferredPeriods/avoidPeriods).
+  scope Json
+
+  totalUnits   Int     @default(0)
+  placedUnits  Int     @default(0)
+  currentPhase String?
+
+  // Present only once COMPLETED: the quality score + placement statistics
+  // this run produced. Shape matches timetable.service.js's own
+  // getTimetableQualityScore output.
+  result       Json?
+  errorMessage String?
+
+  requestedById String
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  @@index([schoolId])
+  @@map("timetable_generation_jobs")
+}
+
+// The single source of truth for "this Teacher Subject Assignment happens on
+// this Day, in this Period," per Timetable.md's own Architecture section.
+// Master/Teacher/Class Timetable are all derived reads of these same rows —
+// never separately stored.
+//
+// classId/teacherId/academicYearId are stored directly here, copied from the
+// chosen Assignment at write time and never independently editable, purely
+// so the two partial unique indexes below (Business Rules #6, #7) can exist
+// as genuine database constraints — a partial unique index cannot span a
+// join. This is a structural reference for constraint enforcement, not the
+// "duplicated Teacher/Subject/Class information" the Business Specification
+// warns against (no name, no descriptive data is ever cached here).
+//
+// shiftId is deliberately NOT stored — always fully determined by periodId
+// (Period.shiftId), cross-validated at write time against the Class's own
+// assigned Shift (Business Rule #5), never a second stored source of truth.
+//
+// Architecture Update (Generation-First): every Lesson now belongs to
+// exactly one TimetableVersion — the two partial unique conflict indexes
+// below are scoped to timetableVersionId (not academicYearId directly,
+// though the version itself is scoped to one Academic Year), since the same
+// Teacher/Class/Day/Period slot legitimately exists as independent Lesson
+// rows across a school's DRAFT and PUBLISHED versions at once — that is not
+// a conflict, it is two different working copies. locked (true only for a
+// Lesson the generator must never touch, per the "Locked lessons must never
+// be regenerated" hard constraint) and lessonGroupId/sequenceInGroup (double
+// periods) are both additive fields with no bearing on any existing
+// Business Rule.
+model Lesson {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  timetableVersionId String
+  timetableVersion   TimetableVersion @relation(fields: [timetableVersionId], references: [id])
+
+  classId String
+  class   Class  @relation(fields: [classId], references: [id])
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id])
+
+  teacherSubjectAssignmentId String
+  teacherSubjectAssignment   TeacherSubjectAssignment @relation(fields: [teacherSubjectAssignmentId], references: [id])
+
+  // Reuses School Schedule Management's own DayOfWeek enum — a Lesson's own
+  // day is a recurring weekday, not a specific calendar date (Business Rule #2).
+  dayOfWeek DayOfWeek
+
+  periodId String
+  period   Period @relation(fields: [periodId], references: [id])
+
+  status LessonStatus @default(ACTIVE)
+
+  // Architecture Update (Generation-First) — Hard Constraint: "Locked
+  // lessons cannot be moved" / "must never be regenerated." Set only via the
+  // dedicated lock/unlock actions, never a side effect of any other write —
+  // the same Guard by Construction convention isDefault/isFinal already use.
+  locked Boolean @default(false)
+
+  // Architecture Update (Generation-First) — double periods. Both null for
+  // an ordinary single-Period Lesson. When set, sequenceInGroup is 1 or 2,
+  // and lessonGroupId identifies the sibling Lesson it must always be
+  // moved/swapped/locked/unlocked/deleted together with, until explicitly
+  // Split (see LessonGroup).
+  lessonGroupId   String?
+  lessonGroup     LessonGroup? @relation(fields: [lessonGroupId], references: [id])
+  sequenceInGroup Int?
+
+  // (Attendance Management) Read-only from this feature's own perspective —
+  // exists only so Prisma can express StudentAttendance.lessonId's own
+  // foreign key (set only for source = TEACHER rows).
+  studentAttendanceRecords StudentAttendance[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId])
+  @@index([schoolId, teacherId])
+  @@index([schoolId, classId])
+  @@index([lessonGroupId])
+  @@map("lessons")
+}
+
+// A Teacher's own scheduling preferences, per Timetable.md's Business Rule
+// #15 — pure data for a future auto-generation feature to read. Nothing in
+// this version enforces or acts on these beyond the read-only Quality Score.
+// At most one row per Teacher, ever — created lazily on first write, updated
+// in place, the same "exactly one, current-only" shape SchoolCalendar
+// already established.
+enum GapPreference {
+  MINIMIZE
+  ALLOW
+  NO_PREFERENCE
+}
+
+model TeacherSchedulePreference {
+  id String @id @default(uuid())
+
+  schoolId String
+
+  teacherId String  @unique
+  teacher   Teacher @relation(fields: [teacherId], references: [id])
+
+  // Arrays of Period ids — a scalar Json column, not a many-to-many join
+  // table, since this list has no per-value metadata and is always read as
+  // a whole, never queried by individual Period (Avoid Premature Abstraction,
+  // the same reasoning School.educationLevels already established).
+  preferredPeriods Json?
+  avoidPeriods     Json?
+
+  // Architecture Update (Generation-First) — Hard Constraint: "Teacher
+  // availability must be respected." Deliberately a separate field from
+  // avoidPeriods above, not a reuse of it: avoidPeriods is a soft
+  // preference the generator may violate if no conflict-free slot otherwise
+  // exists (Business Rule, Soft Optimization); unavailableSlots is a hard
+  // block the generator must never place a Lesson into, full stop — the
+  // same "structurally cannot be true at once" distinction Business Rule #4
+  // already draws between Working Day and Weekend Day. An array of
+  // { dayOfWeek, periodId } objects (a day dimension is required here, since
+  // "unavailable" is naturally a specific day+period combination — e.g. "not
+  // available Monday afternoons" — unlike the school-wide-per-weekday-only
+  // preferredPeriods/avoidPeriods above, which have no day dimension).
+  unavailableSlots Json?
+
+  preferBeforeBreak Boolean?
+  preferAfterBreak  Boolean?
+
+  preferredWorkingDays DayOfWeek[]
+
+  preferredShiftId String?
+  preferredShift   Shift?  @relation(fields: [preferredShiftId], references: [id])
+
+  maxLessonsPerDay      Int?
+  maxConsecutiveLessons Int?
+  gapPreference         GapPreference?
+  spreadFreePeriods     Boolean?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId])
+  @@map("teacher_schedule_preferences")
+}
+
+// A single Teacher Subject Assignment's own scheduling preferences (i.e. this
+// Subject, for this Class, this Year), per Timetable.md's Business Rule #15
+// — the same "attach to the Assignment, not the platform-wide Subject"
+// placement this model's own fields already establish, since "maximum
+// lessons per day" is only meaningful per Class-Subject-Year combination.
+// Pure data, no enforcement, same as TeacherSchedulePreference.
+// Double Period preference now lives entirely in Weekly Subject Allocation
+// (WeeklySubjectAllocationSubject.doublePeriodRequired) — this model no
+// longer carries its own copy; the generation engine reads the one, now
+// authoritative source instead.
+model SubjectSchedulePreference {
+  id String @id @default(uuid())
+
+  schoolId String
+
+  teacherSubjectAssignmentId String                   @unique
+  teacherSubjectAssignment   TeacherSubjectAssignment @relation(fields: [teacherSubjectAssignmentId], references: [id])
+
+  preferredPeriods Json?
+  avoidPeriods     Json?
+
+  preferredDays DayOfWeek[]
+  avoidDays     DayOfWeek[]
+
+  consecutivePeriodsRequired Boolean?
+  spreadAcrossWeek           Boolean?
+  maxLessonsPerDay           Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId])
+  @@map("subject_schedule_preferences")
+}
+
+// A school's own optimization priorities, per Timetable.md's Business Rule
+// #15 — pure toggles for a future auto-generation feature to read. Exactly
+// one row per school, auto-created (all flags false) alongside the default
+// Calendar/Shift/Period bootstrap, the same "created once at school
+// creation, updated in place, never re-created" shape SchoolCalendar and
+// SchoolOptimizationSettings' own sibling models already use.
+model SchoolOptimizationSettings {
+  id String @id @default(uuid())
+
+  // onDelete: Cascade — created inside the same at-risk school-creation
+  // window as SchoolCalendar/Shift/Period (before the first School Admin
+  // account is guaranteed to exist), so School & Platform Management's own
+  // compensating rollback must be able to cascade through this row too, the
+  // same reasoning already established for SchoolCalendar/Shift/Period.
+  schoolId String @unique
+  school   School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  balanceTeacherWorkloads  Boolean @default(false)
+  balanceFirstLastPeriods  Boolean @default(false)
+  minimizeTeacherGaps      Boolean @default(false)
+  distributeSubjectsFairly Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("school_optimization_settings")
+}
+
+// (Weekly Subject Allocation) A per-Grade/Form, per-Academic-Year record of
+// how a school's own available weekly teaching periods are distributed
+// across Subjects — see docs/03-business/Weekly-Subject-Allocation.md and
+// docs/06-technical-design/Weekly-Subject-Allocation.md. Nested under
+// Timetable's own navigation but its own feature module, per that
+// document's own Architecture section. availablePeriodsAtSave is a
+// snapshot only, for Needs-Review comparison — never a second source of
+// truth for "what the available figure is right now," which is always
+// recalculated live from Class Management (GradeLevel's own Shift) and
+// School Schedule Management (Working Days, Teaching Periods).
+model WeeklySubjectAllocation {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  gradeLevelId String
+  gradeLevel   GradeLevel @relation(fields: [gradeLevelId], references: [id])
+
+  availablePeriodsAtSave Int
+
+  subjects WeeklySubjectAllocationSubject[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, academicYearId, gradeLevelId])
+  @@index([schoolId, academicYearId])
+  @@index([gradeLevelId])
+  @@map("weekly_subject_allocations")
+}
+
+// (Weekly Subject Allocation) One line item per Subject within an
+// allocation — the weekly period count and Double Period flag Timetable
+// Management's own generation engine reads, replacing its prior reliance on
+// the now-removed TeacherSubjectAssignment.weeklyLessonTarget (ACR-006) and
+// SubjectSchedulePreference.doublePeriodPreferred.
+model WeeklySubjectAllocationSubject {
+  id String @id @default(uuid())
+
+  weeklySubjectAllocationId String
+  weeklySubjectAllocation   WeeklySubjectAllocation @relation(fields: [weeklySubjectAllocationId], references: [id], onDelete: Cascade)
+
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id])
+
+  weeklyPeriods        Int
+  doublePeriodRequired Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([weeklySubjectAllocationId, subjectId])
+  @@index([weeklySubjectAllocationId])
+  @@map("weekly_subject_allocation_subjects")
+}
+
+// (Attendance Management) The four allowed attendance statuses, per
+// Attendance-Management.md Business Rule #5 — shared by StudentAttendance
+// and StaffAttendance since both use the exact same four values. NOT_RECORDED
+// is deliberately absent (Business Rule #25): it is a derived read-time
+// state (the absence of a row), never a stored value.
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+// (Attendance Management) How an attendance record was created, per
+// Attendance-Management.md Business Rule #21 — one enum spanning both
+// StudentAttendance and StaffAttendance, since the Business Specification
+// names all five sources as one concept; each table's own service-layer
+// validation restricts which subset is legal for it (see
+// docs/06-technical-design/Attendance-Management.md Section D).
+enum AttendanceSource {
+  TEACHER
+  MANAGER_BEFORE_BREAK
+  MANAGER_AFTER_BREAK
+  MANAGER_STAFF_ATTENDANCE
+  ADMIN_MANAGER_ATTENDANCE
+}
+
+// (Attendance Management) One row per (Student, calendar date, context),
+// where context is either a specific Lesson (source = TEACHER) or a
+// Class-wide checkpoint (source = MANAGER_BEFORE_BREAK/MANAGER_AFTER_BREAK).
+// Two different partial unique indexes enforce two different uniqueness
+// shapes depending on source — added via raw SQL in this model's migration,
+// the same justified exception Shift.isDefault/Class.isFinal/
+// AcademicYear.isCurrent/TeacherSubjectAssignment's own composite index
+// already established, since Prisma's schema DSL cannot express a partial
+// unique constraint directly. See Technical Design Section U.
+//
+// classId is denormalized (also reachable via lesson.classId for TEACHER
+// rows) because MANAGER-sourced rows have no lessonId at all — classId is
+// the only way to scope a Manager checkpoint's own uniqueness index.
+//
+// No cascade delete from Student/Lesson — history must survive a Student's
+// lifecycle transition unchanged (Business Rule #29).
+model StudentAttendance {
+  id String @id @default(uuid())
+
+  schoolId String
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id])
+
+  classId String
+  class   Class  @relation(fields: [classId], references: [id])
+
+  // Set only when source = TEACHER (Business Lifecycle §1). Null for both
+  // Manager checkpoint sources, per Business Lifecycle §2.
+  lessonId String?
+  lesson   Lesson? @relation(fields: [lessonId], references: [id])
+
+  date DateTime @db.Date
+
+  source AttendanceSource
+  status AttendanceStatus
+
+  recordedByAccountId String
+  recordedByAccount   Account  @relation("StudentAttendanceRecordedBy", fields: [recordedByAccountId], references: [id])
+  recordedByRole      UserRole
+  recordedAt           DateTime @default(now())
+
+  // Both null until the first correction (Business Rule #13) — the original
+  // recordedBy*/recordedAt above are never overwritten by a correction.
+  correctedByAccountId String?
+  correctedByAccount   Account? @relation("StudentAttendanceCorrectedBy", fields: [correctedByAccountId], references: [id])
+  correctedAt          DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([schoolId])
+  @@index([studentId, date])
+  @@index([lessonId, date])
+  @@index([classId, date])
+  @@map("student_attendance")
+}
+
+// (Attendance Management) One row per (staff Account, calendar date),
+// covering both Manager-records-Teacher/Accountant (source =
+// MANAGER_STAFF_ATTENDANCE) and Admin-records-Manager (source =
+// ADMIN_MANAGER_ATTENDANCE) — one table, not two, since both flows are
+// structurally identical; only source and the legal staffRole differ,
+// enforced at the service layer (Technical Design Section H). No row with
+// staffRole = SCHOOL_ADMIN is ever created by any service function — the
+// structural mechanism behind Business Rule #33.
+model StaffAttendance {
+  id String @id @default(uuid())
+
+  schoolId String
+
+  staffAccountId String
+  staffAccount   Account  @relation("StaffAttendanceSubject", fields: [staffAccountId], references: [id])
+  // Denormalized snapshot of staffAccount.role at the time this record was
+  // created — a staff member's own current role may change later, but the
+  // record must always reflect the role they held on the day it describes.
+  staffRole      UserRole
+
+  date DateTime @db.Date
+
+  source AttendanceSource
+  status AttendanceStatus
+
+  recordedByAccountId String
+  recordedByAccount   Account  @relation("StaffAttendanceRecordedBy", fields: [recordedByAccountId], references: [id])
+  recordedByRole      UserRole
+  recordedAt           DateTime @default(now())
+
+  correctedByAccountId String?
+  correctedByAccount   Account? @relation("StaffAttendanceCorrectedBy", fields: [correctedByAccountId], references: [id])
+  correctedAt          DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([staffAccountId, date])
+  @@index([schoolId])
+  @@map("staff_attendance")
+}
+
+// (Attendance Management) A minimal, one-off non-working calendar date
+// (holiday, closure), per Attendance-Management.md Business Rule #31 — closes
+// a genuine gap, since SchoolCalendar.workingDays only expresses a recurring
+// weekly pattern and cannot represent a single closed date. Deliberately
+// minimal (no recurrence, no per-Shift holidays); scoped to this feature for
+// now per Technical Design Section P, flagged there as a candidate to move
+// into School Schedule Management's own ownership in a future ACR.
+model SchoolNonWorkingDay {
+  id String @id @default(uuid())
+
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  date   DateTime @db.Date
+  reason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, date])
+  @@index([schoolId])
+  @@map("school_non_working_days")
+}
+
+// (Attendance Management) One row per school, holding the configurable
+// time-window values Attendance-Management.md leaves as Open Questions
+// (exact Teacher edit window, Teacher grace period, Manager correction
+// window, Admin correction window, staff-attendance opening offset) — never
+// hardcoded, per Business Rules #6/#23. Null means "no configured value yet
+// / no limit enforced," never a guessed default invented by this feature;
+// mirrors the existing one-row-per-school SchoolOptimizationSettings
+// precedent. See Technical Design Section K.
+model AttendanceSettings {
+  id String @id @default(uuid())
+
+  schoolId String @unique
+  school   School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  teacherEditWindowMinutes      Int?
+  teacherGracePeriodMinutes     Int?
+  managerCorrectionWindowHours  Int?
+  adminCorrectionWindowHours    Int?
+
+  // (v1.3, Attendance-Management.md Business Lifecycle §11, Business Rules
+  // #35-39) Staff-attendance-specific configured times — HH:mm wall-clock
+  // values, same @db.Time() convention as Shift/Period (school-schedule
+  // .service.js's own timeStringToDate/dateToTimeString helpers). Replaces
+  // the old staffAttendanceOpeningOffsetMinutes stub entirely. Unlike the
+  // four minutes/hours fields above, null here does NOT mean "use a system
+  // default" — there is no default; null means "not yet configured," and
+  // every Come/derivation computation must treat that as a hard stop
+  // (Business Rule #38) rather than guessing a value.
+  staffAttendanceStartTime     DateTime? @db.Time()
+  staffAttendanceLateThreshold DateTime? @db.Time()
+  staffAttendanceAbsenceCutoff DateTime? @db.Time()
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("attendance_settings")
 }
 
 // Standard audit record (Tenant, User, Action, Timestamp) per Multi-Tenancy.md.

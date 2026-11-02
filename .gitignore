@@ -1,6 +1,3 @@
-# Documentation (not version-controlled)
-docs/
-
 # Claude Code harness/session config
 .claude/
 
@@ -43,3 +40,12 @@ mobile/*.iml
 # OS
 .DS_Store
 Thumbs.db
+
+# Local-only artifacts (database dumps, machine/network notes, scratch scripts, Neon CLI link)
+*.dump
+*.msi
+ssh-listen.txt
+tailscale-*.txt
+tailscale-*.log
+backend/_tmp_*.js
+backend/.neon

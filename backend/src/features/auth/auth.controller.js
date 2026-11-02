@@ -10,7 +10,7 @@ const login = asyncHandler(async (req, res) => {
 });
 
 const logout = asyncHandler(async (req, res) => {
-  await service.logout(req.body);
+  await service.logout(req.body, req.user);
   return sendSuccess(res, { message: 'Logout successful' });
 });
 
@@ -23,6 +23,11 @@ const createAccount = asyncHandler(async (req, res) => {
   validation.validateCreateAccount(req.body);
   const account = await service.createAccount(req.body, req.user);
   return sendSuccess(res, { statusCode: 201, message: 'Account created', data: account });
+});
+
+const listAccounts = asyncHandler(async (req, res) => {
+  const accounts = await service.listAccounts(req.query, req.user);
+  return sendSuccess(res, { message: 'Accounts retrieved', data: accounts });
 });
 
 const requestPasswordReset = asyncHandler(async (req, res) => {
@@ -45,19 +50,44 @@ const changePassword = asyncHandler(async (req, res) => {
   return sendSuccess(res, { message: 'Password changed successfully' });
 });
 
+// ACR-001: a direct call to either endpoint is always the administrative/
+// security override path — source is hard-coded here, never client-
+// supplied, since it is this file's own job to say "this came from the
+// override endpoint," not the request body's.
 const deactivateAccount = asyncHandler(async (req, res) => {
-  const account = await service.deactivateAccount(req.params.accountId, req.user);
+  validation.validateAccountOverride(req.body);
+  const account = await service.deactivateAccount(req.params.accountId, req.user, {
+    source: 'authentication_override',
+    reason: req.body.reason ?? null,
+  });
   return sendSuccess(res, { message: 'Account deactivated', data: account });
 });
 
 const reactivateAccount = asyncHandler(async (req, res) => {
-  const account = await service.reactivateAccount(req.params.accountId, req.user);
+  validation.validateAccountOverride(req.body);
+  const account = await service.reactivateAccount(req.params.accountId, req.user, {
+    source: 'authentication_override',
+    reason: req.body.reason ?? null,
+  });
   return sendSuccess(res, { message: 'Account reactivated', data: account });
 });
 
 const unlockAccount = asyncHandler(async (req, res) => {
   const account = await service.unlockAccount(req.params.accountId, req.user);
   return sendSuccess(res, { message: 'Account unlocked', data: account });
+});
+
+const resetPasswordAdministratively = asyncHandler(async (req, res) => {
+  const result = await service.resetPasswordAdministratively(req.params.accountId, req.user);
+  return sendSuccess(res, {
+    // ACR-012: only present when PASSWORD_RESET_DELIVERY_MODE=development —
+    // every other mode returns temporaryPassword: null, matching ACR-011's
+    // original invalidate-only behavior unchanged.
+    message: result.temporaryPassword
+      ? 'Password reset. Share this temporary password with the account owner directly — it will not be shown again, and they must change it on first login.'
+      : 'Password reset. The account owner must establish a new password via Forgotten Password Recovery.',
+    data: result,
+  });
 });
 
 const changeRole = asyncHandler(async (req, res) => {
@@ -71,11 +101,13 @@ module.exports = {
   logout,
   refresh,
   createAccount,
+  listAccounts,
   requestPasswordReset,
   confirmPasswordReset,
   changePassword,
   deactivateAccount,
   reactivateAccount,
   unlockAccount,
+  resetPasswordAdministratively,
   changeRole,
 };

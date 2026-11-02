@@ -22,13 +22,17 @@ function validateLogin(body) {
   }
 }
 
+// MANAGER added by ACR-010 — shape-level only; auth.service.js's own
+// role-creation matrix still enforces WHO may create one.
+const VALID_ROLES = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'ACCOUNTANT', 'TEACHER', 'STUDENT', 'MANAGER'];
+
 function validateCreateAccount(body) {
   const errors = {};
   if (!body.email || !EMAIL_REGEX.test(body.email)) {
     errors.email = 'A valid email is required.';
   }
-  if (!body.role || typeof body.role !== 'string') {
-    errors.role = 'Role is required.';
+  if (!body.role || !VALID_ROLES.includes(body.role)) {
+    errors.role = `Role must be one of: ${VALID_ROLES.join(', ')}.`;
   }
   if (Object.keys(errors).length > 0) {
     throw new ValidationError('Invalid account creation request', errors);
@@ -69,6 +73,19 @@ function validateChangePassword(body) {
   }
 }
 
+// ACR-001: request-shape validation only. This function has no repository
+// access and cannot know a target account's role, so it never decides
+// *whether* a reason is required — that role-dependent decision belongs to
+// auth.service.js's assertOverrideReasonProvided, which runs after the
+// target account has been loaded.
+function validateAccountOverride(body) {
+  if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.trim().length === 0)) {
+    throw new ValidationError('Invalid account override request', {
+      reason: 'Reason must be a non-empty string when provided.',
+    });
+  }
+}
+
 function validateRoleChange(body) {
   const allowed = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'ACCOUNTANT', 'TEACHER', 'STUDENT'];
   if (!body.role || !allowed.includes(body.role)) {
@@ -86,4 +103,5 @@ module.exports = {
   validatePasswordResetConfirm,
   validateChangePassword,
   validateRoleChange,
+  validateAccountOverride,
 };
